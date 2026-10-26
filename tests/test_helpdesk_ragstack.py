@@ -111,3 +111,28 @@ def test_doc_path_mapping():
     assert rdf._ragstack_doc_path(None) is None
 
 
+
+
+async def test_query_helpdesk_searches_as_the_user_with_its_settings():
+    """The tool passes the caller's token and the context's RAGStack settings."""
+    from bvbrc_mcp import ToolContext
+    from bvbrc_mcp.tools import helpdesk
+
+    ctx = ToolContext(bvbrc_auth_token="un=u|tokenid=x", helpdesk_config={"ragstack_collection": "c"})
+    with patch.object(rdf, "query_rag_helpdesk_func", return_value={"results": [], "count": 0}) as q:
+        await helpdesk.query_helpdesk("q", top_k=5, config=ctx)
+    assert q.call_args.kwargs == {"query": "q", "top_k": 5, "config": {"ragstack_collection": "c"},
+                                  "auth_token": "un=u|tokenid=x"}
+
+
+async def test_query_helpdesk_falls_back_to_server_settings():
+    """A config without helpdesk_config (the harness's agent config) uses Settings.helpdesk."""
+    from types import SimpleNamespace
+
+    from bvbrc_mcp.settings import get_settings
+    from bvbrc_mcp.tools import helpdesk
+
+    with patch.object(rdf, "query_rag_helpdesk_func", return_value={"results": [], "count": 0}) as q:
+        await helpdesk.query_helpdesk("q", config=SimpleNamespace(bvbrc_auth_token="t"))
+    assert q.call_args.kwargs["config"] == get_settings().helpdesk
+    assert q.call_args.kwargs["config"]["ragstack_collection"] == "bvbrc_helpdesk"

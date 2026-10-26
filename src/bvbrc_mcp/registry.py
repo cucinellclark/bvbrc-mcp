@@ -138,6 +138,8 @@ async def dispatch(
     headers: Optional[Dict[str, str]] = None,
     timeout_seconds: Optional[float] = None,
     dispatch_table: Optional[Dict[str, Callable[..., Awaitable[Dict[str, Any]]]]] = None,
+    inject_config: bool = True,
+    inject_headers: bool = True,
 ) -> Dict[str, Any]:
     """Run one tool and return its result dict (errors included, never raised).
 
@@ -149,6 +151,9 @@ async def dispatch(
         headers: Auth headers; default ``{"Authorization": ctx.bvbrc_auth_token}``.
         timeout_seconds: The caller's timeout; a tool's own longer timeout wins.
         dispatch_table: Another name -> function table (a caller that adds tools).
+        inject_config: Pass ``ctx`` to the tool as ``config`` (when ctx is not None).
+        inject_headers: Pass headers to the tool; when False, none are derived
+            from the token either.
     """
     table = TOOL_DISPATCH if dispatch_table is None else dispatch_table
     func = table.get(tool_name)
@@ -159,14 +164,15 @@ async def dispatch(
     if "_unparseable_arguments" in arguments:
         return unparseable_arguments_result(tool_name, arguments.get("_unparseable_arguments"))
 
-    if headers is None:
+    if headers is None and inject_headers:
         token = getattr(ctx, "bvbrc_auth_token", None)
         headers = {"Authorization": token} if token else None
     base = timeout_seconds if timeout_seconds is not None else getattr(ctx, "tool_timeout_seconds", 30.0)
-    timeout = max(float(base or 30.0), TOOL_TIMEOUT_OVERRIDES.get(tool_name, 0.0))
+    timeout = max(base if base else 30.0, TOOL_TIMEOUT_OVERRIDES.get(tool_name, 0.0))
 
-    arguments.setdefault("config", ctx)
-    if headers is not None:
+    if inject_config and ctx is not None:
+        arguments.setdefault("config", ctx)
+    if inject_headers and headers is not None:
         arguments.setdefault("headers", headers)
 
     try:

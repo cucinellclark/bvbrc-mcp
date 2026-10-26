@@ -78,3 +78,12 @@ def test_tool_list_matches_the_schemas():
     for t in TOOLS:
         assert t.parameters.get("type") == "object"
         assert t.description
+
+
+async def test_injection_can_be_turned_off():
+    calls = []
+    ctx = ToolContext(bvbrc_auth_token="t")
+    await dispatch("probe_data", {"x": 1}, ctx, dispatch_table={"probe_data": _recorder(calls)},
+                   inject_config=False, inject_headers=False)
+    await dispatch("probe_data", {"x": 2}, None, dispatch_table={"probe_data": _recorder(calls)})
+    assert calls == [{"x": 1}, {"x": 2}]
