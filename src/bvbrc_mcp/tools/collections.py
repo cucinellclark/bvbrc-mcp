@@ -10,7 +10,7 @@ openpyxl is not installed in the orchestrator env (the loader returned an
 empty catalog for every collection).  After editing the spreadsheet,
 regenerate it with a Python that has openpyxl::
 
-    python3 shared/tools/collections.py
+    python -m bvbrc_mcp.tools.collections
 
 Any agent can import ``list_collections`` / ``get_collection_fields`` to
 discover what data is available.

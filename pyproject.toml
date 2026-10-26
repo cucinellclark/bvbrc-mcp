@@ -35,7 +35,7 @@ version = {attr = "bvbrc_mcp.__version__"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-bvbrc_mcp = ["resources/*.json", "resources/solr_collections/*.txt", "resources/service_specs/*.json"]
+bvbrc_mcp = ["resources/*.json", "resources/*.xlsx", "resources/solr_collections/*.txt", "resources/service_specs/*.json"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
