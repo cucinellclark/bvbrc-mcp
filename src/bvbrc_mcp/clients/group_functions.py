@@ -481,6 +481,10 @@ async def get_group_ids(
     """
     Resolve a group by name and return its member IDs.
 
+    *name* may also be a full workspace path (``/<owner>@<realm>/...``, or
+    the website's ``/public/<owner>/...``), read directly: that is how a
+    shared or public group is reached.
+
     Combines :func:`resolve_group_path` with a data fetch.
 
     Returns
@@ -492,14 +496,24 @@ async def get_group_ids(
             "count": N,
             "name": "GroupName",
             "path": "/user/home/Genome Groups/GroupName",
-            "match_type": "exact"|"fuzzy",
+            "match_type": "exact"|"fuzzy"|"path",
             "source": "bvbrc-workspace"
         }
 
     Or an error / ambiguous-candidates dict from resolve_group_path.
     """
-    # Resolve name → path
-    resolved = await resolve_group_path(api, name, group_type, token)
+    if name.startswith("/"):
+        # A full path: read it directly, whoever owns it (shared and public
+        # groups live outside the user's home).  "/public/<owner>/..." is the
+        # website's display form of "/<owner>/...".
+        parts = name.rstrip("/").split("/")
+        if len(parts) > 2 and parts[1] == "public" and "@" in parts[2]:
+            parts = [""] + parts[2:]
+        path = "/".join(parts)
+        resolved = {"path": path, "name": parts[-1], "match_type": "path"}
+    else:
+        # Resolve name → path
+        resolved = await resolve_group_path(api, name, group_type, token)
 
     # Propagate errors and ambiguous results up
     if "error" in resolved or resolved.get("match_type") == "ambiguous":
@@ -511,6 +525,13 @@ async def get_group_ids(
 
     # Fetch the group data
     obj = await _workspace_get(api, group_path, token, metadata_only=False)
+    if "error" in obj and match_type == "path":
+        return {
+            "error": f"No group was found at '{group_path}' (or you cannot read it).",
+            "errorType": obj.get("errorType", "NOT_FOUND"),
+            "path": group_path,
+            "source": "bvbrc-workspace",
+        }
     if "error" in obj:
         return {
             "error": f"Group '{group_name}' was found but could not be read: {obj['error']}",
@@ -525,6 +546,15 @@ async def get_group_ids(
         return {
             "error": f"Group '{group_name}' has invalid data format",
             "errorType": "INVALID_RESPONSE",
+            "source": "bvbrc-workspace",
+        }
+
+    actual_type = (obj.get("metadata") or {}).get("type")
+    if match_type == "path" and actual_type and actual_type != group_type:
+        return {
+            "error": f"'{group_path}' is a {actual_type}, not a {group_type}.",
+            "errorType": "WRONG_TYPE",
+            "path": group_path,
             "source": "bvbrc-workspace",
         }
 

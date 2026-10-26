@@ -346,7 +346,9 @@ WORKSPACE_BROWSE = {
             "Browse and search files in the user's BV-BRC cloud workspace. "
             "Use this to list folder contents, find files by name, type, or "
             "extension. Without filters, lists the immediate contents of the "
-            "given path. With filters, performs a recursive search."
+            "given path. With filters, performs a recursive search. "
+            "Other users' folders work too: pass their full path "
+            "(/<owner>@<realm>/<workspace>/...). To find them, use scope."
         ),
         "parameters": {
             "type": "object",
@@ -357,7 +359,20 @@ WORKSPACE_BROWSE = {
                         "Workspace path to browse. Use relative paths like "
                         "'Genome Groups' or 'my_project/results' -- they are "
                         "resolved relative to the user's home directory. "
+                        "A full path (/<owner>@<realm>/...) opens another "
+                        "user's shared or public folder. "
                         "Leave empty or omit to browse the home directory root."
+                    ),
+                },
+                "scope": {
+                    "type": "string",
+                    "enum": ["shared", "public"],
+                    "description": (
+                        "List other users' top-level workspaces instead of a "
+                        "path: 'shared' = shared with this user, 'public' = "
+                        "public workspaces (several hundred; filter with "
+                        "name_contains, which matches the workspace name or "
+                        "its owner). Omit to browse a path."
                     ),
                 },
                 "name_contains": {
@@ -891,8 +906,9 @@ GET_GROUP_IDS = {
         "name": "get_group_ids",
         "description": (
             "Get the member IDs (genome IDs or feature IDs) from a genome "
-            "group or feature group by name. The group is looked up by name "
-            "automatically -- you do NOT need to provide a workspace path. "
+            "group or feature group. Give the user's group by name (looked up "
+            "automatically); give any other group -- shared, public, or found "
+            "by browsing -- by its full workspace path. "
             "If the name is ambiguous, returns candidates for clarification."
         ),
         "parameters": {
@@ -901,8 +917,9 @@ GET_GROUP_IDS = {
                 "group_name": {
                     "type": "string",
                     "description": (
-                        "Name of the group (e.g. 'My E. coli genomes'). "
-                        "Do NOT provide a workspace path -- just the name."
+                        "Name of one of the user's groups (e.g. 'My E. coli "
+                        "genomes'), or the full workspace path of any group "
+                        "(starting with '/', e.g. a path from workspace_browse)."
                     ),
                 },
                 "group_type": {

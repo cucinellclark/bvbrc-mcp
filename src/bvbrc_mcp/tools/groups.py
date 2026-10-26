@@ -255,18 +255,19 @@ async def get_group_ids(
     headers: Optional[Dict[str, str]] = None,
     **kwargs: Any,
 ) -> Dict[str, Any]:
-    """Get the member IDs of a genome or feature group by name.
+    """Get the member IDs of a genome or feature group by name or path.
 
-    The group is looked up by name automatically — the system searches
-    the user's default group folder and will find the group even if the
-    name casing doesn't match exactly.
+    A name is looked up automatically — the system searches the user's
+    default group folder and will find the group even if the name casing
+    doesn't match exactly.  A full workspace path (starting with ``/``) is
+    read directly, so shared and public groups work too.
 
     If the name is ambiguous (matches multiple groups), returns a list of
     candidates so the user can clarify.
 
     Args:
-        group_name: Name of the group (e.g. ``"My E. coli genomes"``).
-            Do NOT provide a workspace path — just the name.
+        group_name: Name of one of the user's groups, or the full
+            workspace path of any group.
         group_type: ``"genome_group"`` or ``"feature_group"``.
         config: Agent configuration object.
         headers: HTTP headers with auth token.

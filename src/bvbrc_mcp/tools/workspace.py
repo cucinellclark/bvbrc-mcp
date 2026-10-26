@@ -180,8 +180,115 @@ def compact_workspace_item(item: Any) -> Any:
     return out
 
 
+_PERMISSION_WORDS = {"r": "read", "w": "write", "a": "admin", "o": "owner", "n": "none"}
+BROWSE_SCOPES = ("shared", "public")
+
+
+def _top_level_workspace(item: Any) -> Optional[Dict[str, Any]]:
+    """A ``Workspace.ls("/")`` tuple as ``{name, path, owner, ...}``."""
+    if not isinstance(item, list) or len(item) < 6:
+        return None
+    name, owner = item[0], item[5]
+    path = f"/{owner}/{name}"
+    from bvbrc_mcp.tools.url_utils import build_workspace_url
+
+    return {
+        "name": name,
+        "type": item[1],
+        "path": path,
+        "owner": owner,
+        "creation_time": item[3],
+        "public": (item[10] if len(item) > 10 else "n") == "r",
+        "_global": item[10] if len(item) > 10 else "n",
+        "workspace_browser_url": build_workspace_url(path),
+    }
+
+
+async def _add_your_permission(api: Any, token: str, user_id: str, rows: List[Dict[str, Any]]) -> None:
+    """Set ``your_permission`` on shared workspaces (one batched call).
+
+    The ``ls`` tuple's user-permission field does not show a share granted to
+    this user (AllanShare lists ``n`` for a user with ``w``), so ask
+    ``Workspace.list_permissions``.  Best effort: on failure the field is
+    left out.
+    """
+    try:
+        raw = await api.acall("Workspace.list_permissions", {"objects": [w["path"] for w in rows]}, 1, token)
+        perms = raw[0] if raw and isinstance(raw[0], dict) else {}
+    except Exception:
+        perms = {}
+    for w in rows:
+        for who, perm in perms.get(w["path"]) or []:
+            if who == user_id:
+                w["your_permission"] = _PERMISSION_WORDS.get(perm, perm)
+        if "your_permission" not in w and w["_global"] in ("w", "a"):
+            # Not shared by name: open to every user.
+            w["your_permission"] = _PERMISSION_WORDS[w["_global"]]
+            w["open_to_all_users"] = True
+
+
+async def _browse_other_workspaces(
+    api: Any,
+    token: str,
+    user_id: Optional[str],
+    scope: str,
+    name_contains: Optional[List[str]],
+    sort_by: Optional[str],
+    sort_order: Optional[str],
+    num_results: int,
+) -> Dict[str, Any]:
+    """Top-level workspaces of other users: shared with this user, or public.
+
+    ``Workspace.ls`` on ``/`` lists every top-level workspace the token can
+    see: the user's own, those shared with them, and every public one
+    (global permission ``r``, several hundred).  The website's "Shared with
+    me" / "Public Workspaces" views split the same list the same way.
+    """
+    raw = await api.acall("Workspace.ls", {"paths": ["/"]}, 1, token)
+    rows: List[Dict[str, Any]] = []
+    listed = [i for entry in (raw or []) if isinstance(entry, dict)
+              for items in entry.values() if isinstance(items, list) for i in items]
+    for item in listed:
+        ws = _top_level_workspace(item)
+        if not ws or (user_id and ws["owner"] == user_id):
+            continue
+        if (scope == "public") != ws["public"]:
+            continue
+        rows.append(ws)
+    total = len(rows)
+    terms = [t.lower() for t in (name_contains or []) if t and t.strip()]
+    if terms:
+        rows = [w for w in rows if all(t in f"{w['owner']}/{w['name']}".lower() for t in terms)]
+    key = sort_by if sort_by in ("name", "creation_time") else "name"
+    rows.sort(key=lambda w: (str(w.get(key) or "").lower(), w["owner"]),
+              reverse=(sort_order == "desc"))
+    matched = len(rows)
+    rows = rows[:num_results]
+    if scope == "shared" and rows and user_id:
+        await _add_your_permission(api, token, user_id, rows)
+    for w in rows:
+        w.pop("_global", None)
+    result: Dict[str, Any] = {
+        "scope": scope,
+        "items": rows,
+        "count": len(rows),
+        "matched": matched,
+        "source": "bvbrc-workspace",
+    }
+    if scope == "shared":
+        result["note"] = f"{total} workspaces other users have shared with you (public ones are listed with scope='public')."
+    else:
+        result["note"] = f"{total} public workspaces from other users."
+    if matched > num_results:
+        result["truncated"] = True
+        result["hint"] = "Narrow the list with name_contains (matches the workspace name or its owner)."
+    result["next_step"] = "Browse one with workspace_browse(path=<its path>); every workspace tool takes these paths."
+    return result
+
+
 async def workspace_browse(
     path: Optional[str] = None,
+    scope: Optional[str] = None,
     name_contains: Optional[List[str]] = None,
     file_extensions: Optional[List[str]] = None,
     workspace_types: Optional[List[str]] = None,
@@ -193,6 +300,10 @@ async def workspace_browse(
     **kwargs: Any,
 ) -> Dict[str, Any]:
     """Browse and search files in the user's workspace.
+
+    With *scope* (``"shared"`` / ``"public"``) it lists other users' top-level
+    workspaces instead of a path; *name_contains*, *sort_by* and
+    *num_results* still apply.
 
     Uses ``workspace_functions.workspace_browse`` which handles both
     directory listing (no filters) and recursive search (with filters).
@@ -215,6 +326,24 @@ async def workspace_browse(
     if not num_results or num_results < 1:
         num_results = 50
     num_results = min(num_results, 500)
+
+    if scope:
+        if scope not in BROWSE_SCOPES:
+            return {
+                "error": f"Invalid scope '{scope}'. Use 'shared' or 'public', or omit it to browse a path.",
+                "errorType": "INVALID_PARAMETERS",
+                "source": "bvbrc-workspace",
+            }
+        try:
+            return await _browse_other_workspaces(
+                api, token, user_id, scope, name_contains, sort_by, sort_order, num_results,
+            )
+        except Exception as e:
+            return {
+                "error": f"Listing {scope} workspaces failed: {type(e).__name__}: {e}",
+                "errorType": "API_ERROR",
+                "source": "bvbrc-workspace",
+            }
 
     resolved_path = _resolve_path(path, user_id)
 
