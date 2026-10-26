@@ -1037,8 +1037,8 @@ SEARCH_LITERATURE = {
     "function": {
         "name": "search_literature",
         "description": (
-            "Search published scientific literature (ASM journals + PubMed Central "
-            "open-access) and return distinct papers, each with title, DOI/URL, year, "
+            "Search published scientific literature (PubMed Central open-access "
+            "articles) and return distinct papers, each with title, DOI/URL, year, "
             "journal, authors when known, and the retrieved passages. Use this when the "
             "user asks for published evidence, papers about an organism/gene, or "
             "literature-backed facts (PPI, mutations, phenotypes). Cite only papers it "

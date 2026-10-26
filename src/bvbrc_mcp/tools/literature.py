@@ -38,10 +38,13 @@ import httpx
 
 _DEFAULT_LITERATURE_RAG_URL = "https://www.bv-brc.org/ragstack/asm-next/api"
 _DEFAULT_TIMEOUT_SECONDS = 45
-# ASM journals (asm-tok256) plus PubMed Central open-access. Measured
-# 2026-10-08 on 16 questions: asm-tok256 alone gave ~35% on-topic papers,
-# open-access ~61%; searching both lets the reranker pick across them.
-_DEFAULT_COLLECTIONS = ["asm-tok256", "open-access"]
+# PubMed Central open-access only (decision 2026-10-26: no ASM journals).
+# Always sent explicitly: the RAGStack server's own default is asm-tok256.
+# Configurable through config.literature_rag_collections (ToolContext,
+# Settings.literature_collections, the harness's LITERATURE_RAG_COLLECTIONS).
+# For reference, 2026-10-08 on 16 questions: asm-tok256 alone gave ~35%
+# on-topic papers, open-access ~61%.
+_DEFAULT_COLLECTIONS = ["open-access"]
 
 MAX_PAPERS = 20
 MAX_PASSAGES_PER_PAPER = 2
@@ -321,14 +324,22 @@ async def search_literature(
             response = await client.post(retrieve_url, json=payload, headers=req_headers)
             if response.status_code == 404 and "collections" in payload:
                 # A collection was removed or is not readable by this user;
-                # RAGStack refuses the whole request. Fall back to the
-                # caller's default collection rather than failing.
+                # RAGStack refuses the whole request. Do NOT retry without
+                # "collections": that searches the server's default (ASM).
                 print(
-                    "search_literature: collections refused (404), retrying with default",
+                    f"search_literature: collections {collections} refused (404)",
                     file=sys.stderr,
                 )
-                payload.pop("collections")
-                response = await client.post(retrieve_url, json=payload, headers=req_headers)
+                return {
+                    "error": (
+                        f"The literature collection(s) {', '.join(collections)} are not "
+                        "available right now, so no papers were searched."
+                    ),
+                    "errorType": "LITERATURE_COLLECTION_UNAVAILABLE",
+                    "collections": collections,
+                    "query": query,
+                    "source": "literature-rag",
+                }
             response.raise_for_status()
             data = response.json()
 

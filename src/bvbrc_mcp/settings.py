@@ -31,7 +31,9 @@ class Settings:
     gowe_url: Optional[str] = None
     minhash_url: str = "https://p3.theseed.org/services/minhash_service"
     literature_url: str = "https://www.bv-brc.org/ragstack/asm-next/api"
-    literature_collections: List[str] = field(default_factory=lambda: ["asm-tok256", "open-access"])
+    # RAGStack literature collections ("open-access" = PubMed Central OA).
+    # Env: BVBRC_MCP_LITERATURE_COLLECTIONS='["open-access"]'.
+    literature_collections: List[str] = field(default_factory=lambda: ["open-access"])
     helpdesk: Dict[str, Any] = field(default_factory=lambda: {
         "ragstack_base_url": "https://www.bv-brc.org/ragstack/clark/api",
         "ragstack_collection": "bvbrc_helpdesk",

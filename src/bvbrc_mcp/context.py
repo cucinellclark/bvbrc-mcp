@@ -26,7 +26,8 @@ class ToolContext:
     similar_genome_finder_url: str = "https://p3.theseed.org/services/minhash_service"
     literature_rag_url: str = "https://www.bv-brc.org/ragstack/asm-next/api"
     literature_rag_timeout_seconds: int = 45
-    literature_rag_collections: List[str] = field(default_factory=lambda: ["asm-tok256", "open-access"])
+    # RAGStack literature collections searched; "open-access" is PubMed Central OA.
+    literature_rag_collections: List[str] = field(default_factory=lambda: ["open-access"])
     # Helpdesk search (RAGStack): ragstack_base_url, ragstack_collection,
     # ragstack_retrieval_mode, ragstack_rerank, ragstack_timeout_seconds.
     helpdesk_config: Dict[str, Any] = field(default_factory=dict)
