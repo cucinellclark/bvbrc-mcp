@@ -1,0 +1,15 @@
+{
+  "gowe_url": "http://localhost:7000",
+  "public_url": "https://www.bv-brc.org/mcp",
+  "host": "127.0.0.1",
+  "port": 12010,
+  "mcp_path": "/",
+  "oauth": {
+    "allowed_callback_urls": [
+      "https://chatgpt.com/connector_platform_oauth_redirect",
+      "https://claude.ai/api/mcp/auth_callback"
+    ],
+    "allowed_callback_origins": [],
+    "client_store_path": "data/oauth_clients.json"
+  }
+}
