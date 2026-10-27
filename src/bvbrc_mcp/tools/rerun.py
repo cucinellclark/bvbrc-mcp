@@ -109,9 +109,8 @@ async def _job_results(folder: str, config: Any, headers: Dict[str, str]) -> Dic
     )
     if not isinstance(listing, dict) or listing.get("error"):
         return listing if isinstance(listing, dict) else {"error": "Workspace listing failed."}
-    inner = listing.get("result") or {}
-    base = (inner.get("path") or folder).rstrip("/")
-    raw = [i for i in inner.get("items") or [] if isinstance(i, dict) and i.get("type") == "job_result"]
+    base = (listing.get("path") or folder).rstrip("/")
+    raw = [i for i in listing.get("items") or [] if isinstance(i, dict) and i.get("type") == "job_result"]
     if len(raw) > MAX_JOB_ITEMS:
         return {
             "error": (

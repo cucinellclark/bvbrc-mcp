@@ -443,7 +443,6 @@ async def workspace_browse(
     name_match: str = "all",
     created_after: str = None,
     created_before: str = None,
-    tool_name: str = "workspace_browse_tool"
 ) -> dict:
     """
     Unified workspace browser entrypoint.
@@ -480,23 +479,20 @@ async def workspace_browse(
         paths: Several folders at once (overrides *path* when it has 2+ entries).
         name_match: How name terms combine: "all", "any", or "word" (see ``name_regex``).
         created_after / created_before: ISO date range (after inclusive, before exclusive).
-        tool_name: Name of the calling tool (for response envelope).
 
-    Returns a consistent response envelope with all data nested under "result":
+    Returns one flat dict (no envelope; flattened 2026-10-27 so a listing
+    reads like a ``scope`` result):
       {
-        "result": {
-          "items": <array> | "metadata": <dict>,  // items for search/list, metadata for file/object
-          "tool_name": <tool name>,
-          "result_type": "search_result" | "list_result" | "metadata_result",
-          "count": <number>,      // items returned (search/list)
-          "total": <number>,      // items matched (search/list)
-          "truncated": <bool>,    // more matched than returned (search/list)
-          "offset", "next_offset": paging (next_offset only when more remain)
-          "summary": {by_type, total_size, oldest, newest, by_folder | by_root}
-          "hidden_in_job_outputs": <number>,  // search only, when > 0
-          "path": <workspace path> | "paths": [<roots>], "unreadable": [...]
-          "source": "bvbrc-workspace"
-        }
+        "items": <array> | "metadata": <dict>,  // items for search/list, metadata for file/object
+        "result_type": "search_result" | "list_result" | "metadata_result",
+        "count": <number>,      // items returned (search/list)
+        "total": <number>,      // items matched (search/list)
+        "truncated": <bool>,    // more matched than returned (search/list)
+        "offset", "next_offset": paging (next_offset only when more remain)
+        "summary": {by_type, total_size, oldest, newest, by_folder | by_root}
+        "hidden_in_job_outputs": <number>,  // search only, when > 0
+        "path": <workspace path> | "paths": [<roots>], "unreadable": [...]
+        "source": "bvbrc-workspace"
       }
     """
     if not token:
@@ -529,7 +525,6 @@ async def workspace_browse(
         end = offset + len(page)
         result = {
             "items": page,
-            "tool_name": tool_name,
             "result_type": result_type,
             "count": len(page),
             "total": total,
@@ -563,7 +558,7 @@ async def workspace_browse(
             hints.append(f"{len(unreadable)} folder(s) could not be read; see unreadable.")
         if hints:
             result["hint"] = " ".join(hints)
-        return {"result": result}
+        return result
 
     def _keep(pairs: list) -> tuple:
         """Apply the date range, max_depth and the job-output rule;
@@ -675,13 +670,10 @@ async def workspace_browse(
         return _items_response([(path, i) for i in _listing(list_result)], "list_result")
 
     return {
-        "result": {
-            "metadata": metadata,
-            "tool_name": tool_name,
-            "result_type": "metadata_result",
-            "path": path,
-            "source": "bvbrc-workspace",
-        }
+        "metadata": metadata,
+        "result_type": "metadata_result",
+        "path": path,
+        "source": "bvbrc-workspace",
     }
 
 

@@ -336,7 +336,7 @@ async def _browse_other_workspaces(
     key = sort_by if sort_by in ("name", "creation_time") else "name"
     rows.sort(key=lambda w: (str(w.get(key) or "").lower(), w["owner"]),
               reverse=(sort_order == "desc"))
-    matched = len(rows)
+    matched = len(rows)  # after the name / date filters
     rows = rows[:num_results]
     if scope == "shared" and rows and user_id:
         await _add_your_permission(api, token, user_id, rows)
@@ -344,17 +344,18 @@ async def _browse_other_workspaces(
         w.pop("_global", None)
     result: Dict[str, Any] = {
         "scope": scope,
+        "result_type": "workspaces",
         "items": rows,
         "count": len(rows),
-        "matched": matched,
+        "total": matched,  # same name as in a folder listing
+        "truncated": matched > len(rows),
         "source": "bvbrc-workspace",
     }
     if scope == "shared":
         result["note"] = f"{total} workspaces other users have shared with you (public ones are listed with scope='public')."
     else:
         result["note"] = f"{total} public workspaces from other users."
-    if matched > num_results:
-        result["truncated"] = True
+    if result["truncated"]:
         result["hint"] = "Narrow the list with name_contains (matches the workspace name or its owner)."
     result["next_step"] = "Browse one with workspace_browse(path=<its path>); every workspace tool takes these paths."
     return result
@@ -465,7 +466,8 @@ async def workspace_browse(
                     "source": "bvbrc-workspace",
                 }
             if not shared:
-                return {"scope": "shared", "items": [], "count": 0, "total": 0,
+                return {"scope": "shared", "result_type": "search_result", "items": [], "count": 0,
+                        "total": 0, "truncated": False,
                         "note": "No workspaces are shared with you.", "source": "bvbrc-workspace"}
             shared.sort(key=lambda w: (w["name"].lower(), w["owner"]))
             roots = [w["path"] for w in shared][:MAX_SEARCH_ROOTS]
@@ -519,7 +521,6 @@ async def workspace_browse(
             name_match=name_match,
             created_after=created_after,
             created_before=created_before,
-            tool_name="workspace_browse",
         )
 
         # Detect object-not-found buried inside the result dict
@@ -528,13 +529,12 @@ async def workspace_browse(
             if err_val and _is_object_not_found(err_val):
                 return _path_not_found_result(resolved_path)
 
-        if isinstance(result, dict) and isinstance(result.get("result"), dict):
-            inner = result["result"]
-            if isinstance(inner.get("items"), list):
-                inner["items"] = [compact_workspace_item(i) for i in inner["items"]]
+        if isinstance(result, dict) and not result.get("error"):
+            if isinstance(result.get("items"), list):
+                result["items"] = [compact_workspace_item(i) for i in result["items"]]
             if scope_note:
-                inner["scope"] = scope
-                inner["note"] = scope_note
+                result["scope"] = scope
+                result["note"] = scope_note
 
         # Attach a workspace browser URL so the LLM can include a
         # clickable markdown link in its response.

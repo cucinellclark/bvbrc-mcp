@@ -171,9 +171,8 @@ async def list_samples(
         )
         if not isinstance(listing, dict) or listing.get("error"):
             return listing if isinstance(listing, dict) else {"error": "Workspace listing failed."}
-        inner = listing.get("result") or {}
-        items = [i for i in inner.get("items") or [] if isinstance(i, dict)]
-        folder = inner.get("path") or path
+        items = [i for i in listing.get("items") or [] if isinstance(i, dict)]
+        folder = listing.get("path") or path
         result["folder"] = folder
         if len(items) > MAX_FOLDER_ITEMS:
             notes.append(

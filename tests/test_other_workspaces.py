@@ -81,7 +81,7 @@ async def test_public_excludes_own_and_filters_by_name_or_owner(api):
 
 async def test_cap_says_how_to_narrow(api):
     r = await ws.workspace_browse(scope="public", num_results=1, headers=HEADERS)
-    assert r["count"] == 1 and r["matched"] == 2 and r["truncated"] is True
+    assert r["count"] == 1 and r["total"] == 2 and r["truncated"] is True
     assert "name_contains" in r["hint"]
 
 
@@ -154,7 +154,7 @@ async def test_shared_search_looks_inside_every_shared_workspace(monkeypatch):
     fake = SearchingApi(TREES)
     monkeypatch.setattr(ws, "_get_api", lambda config=None: fake)
     r = await ws.workspace_browse(scope="shared", name_contains=["strep"], recursive=True, headers=HEADERS)
-    inner = r["result"]
+    inner = r
     assert sorted(i["name"] for i in inner["items"]) == ["Streptococcus public", "strep.fasta"]
     assert inner["summary"]["by_root"] == {"/allan@patricbrc.org/AllanShare": 1, "/bob@patricbrc.org/TeamData": 1}
     assert inner["hidden_in_job_outputs"] == 1 and inner["scope"] == "shared"
@@ -167,7 +167,7 @@ async def test_shared_search_looks_inside_every_shared_workspace(monkeypatch):
 async def test_one_unreadable_workspace_does_not_sink_the_search(monkeypatch):
     fake = SearchingApi(TREES, broken={"/carol@patricbrc.org/Scratch"})
     monkeypatch.setattr(ws, "_get_api", lambda config=None: fake)
-    inner = (await ws.workspace_browse(scope="shared", workspace_types=["genome_group"], headers=HEADERS))["result"]
+    inner = await ws.workspace_browse(scope="shared", workspace_types=["genome_group"], headers=HEADERS)
     assert [i["name"] for i in inner["items"]] == ["Streptococcus public"]
     assert inner["unreadable"][0]["path"] == "/carol@patricbrc.org/Scratch"
 
@@ -187,7 +187,7 @@ async def test_public_contents_are_never_searched(api):
 async def test_several_paths_in_one_call(monkeypatch):
     fake = SearchingApi(TREES)
     monkeypatch.setattr(ws, "_get_api", lambda config=None: fake)
-    inner = (await ws.workspace_browse(paths=list(TREES), recursive=True, headers=HEADERS))["result"]
+    inner = await ws.workspace_browse(paths=list(TREES), recursive=True, headers=HEADERS)
     assert inner["paths"] == list(TREES) and inner["total"] == 2
     assert {i["path"] for i in inner["items"]} == {"/allan@patricbrc.org/AllanShare/Streptococcus public",
                                                   "/bob@patricbrc.org/TeamData/seqs/strep.fasta"}

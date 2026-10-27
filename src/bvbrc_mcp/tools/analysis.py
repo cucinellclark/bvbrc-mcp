@@ -169,8 +169,7 @@ async def check_job_outputs(
     def items_of(res: Any) -> list[dict[str, Any]] | None:
         if not isinstance(res, dict) or res.get("error") or res.get("errorType"):
             return None
-        inner = res.get("result", res)
-        items = inner.get("items") if isinstance(inner, dict) else None
+        items = res.get("items")
         return [i for i in items if isinstance(i, dict)] if isinstance(items, list) else None
 
     check: dict[str, Any] = {"output_folder": output_folder}
