@@ -610,12 +610,25 @@ def build_workspace_url(
 
         >>> build_workspace_url("/user@bv-brc.org/home/MyData")
         'https://www.bv-brc.org/workspace/user@bv-brc.org/home/MyData'
+        >>> build_workspace_url("/user@bv-brc.org/home/Run #3")
+        'https://www.bv-brc.org/workspace/user@bv-brc.org/home/Run%20%233'
+
+    Each folder and file name is percent-encoded like JavaScript's
+    ``encodeURIComponent`` (a raw ``#`` would cut the URL); the user segment
+    and ``/`` stay as they are. Same rule as the chat's workspace path chips
+    (``WorkspacePathUtils.encodeWorkspacePath``, after the website's
+    ``util/encodePath``), so a chip and a link to one folder are identical.
     """
     if not workspace_path:
         return None
 
     # Strip leading slash for URL construction (workspace route adds it)
-    clean_path = workspace_path.lstrip("/")
+    parts = workspace_path.lstrip("/").split("/")
+    keep = 2 if parts[0] == "public" else 1
+    clean_path = "/".join(
+        part if i < keep else quote(part, safe="!*'()")
+        for i, part in enumerate(parts)
+    )
     return f"{base_url}/workspace/{clean_path}"
 
 
