@@ -416,6 +416,31 @@ WORKSPACE_BROWSE = {
                         "match 'Lactobacillus')."
                     ),
                 },
+                "file_extensions": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "File extensions to match (OR logic). Example: "
+                        "['fastq', 'fq'] finds .fastq OR .fq files. "
+                        "Do NOT combine with workspace_types for the same "
+                        "file category."
+                    ),
+                },
+                "workspace_types": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": WORKSPACE_TYPES,
+                    },
+                    "description": (
+                        "Workspace object types to match (OR logic). This is "
+                        "the PREFERRED way to find files by category. Examples: "
+                        "'reads' for sequencing data, 'feature_protein_fasta' "
+                        "for protein FASTA files, 'gff' for annotations. "
+                        "When the user asks for files of a type, use ONLY "
+                        "workspace_types -- do not also set name_contains."
+                    ),
+                },
                 "created_after": {
                     "type": "string",
                     "description": (
