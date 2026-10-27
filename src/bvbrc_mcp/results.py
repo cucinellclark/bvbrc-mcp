@@ -135,28 +135,18 @@ def _sample_representative(items: list, budget: int) -> list:
     return sampled[:budget]
 
 
-def _strip_ui_grid(obj: Any) -> Any:
-    """Recursively remove ``ui_grid`` keys from a result dict."""
-    if isinstance(obj, dict):
-        return {k: _strip_ui_grid(v) for k, v in obj.items() if k != "ui_grid"}
-    if isinstance(obj, list):
-        return [_strip_ui_grid(v) for v in obj]
-    return obj
-
-
 def truncate_result(result: Dict[str, Any], max_chars: int = 8000) -> str:
     """Serialize a tool result to JSON, truncating if too large.
 
     Smart truncation strategy:
-      1. Strips ``ui_grid`` payloads (duplicate data for UI rendering).
-      2. Catalog lists (``workflows``) are never sampled -- every entry is
+      1. Catalog lists (``workflows``) are never sampled -- every entry is
          kept and descriptions are shortened instead, so the LLM always
          sees the full set of available workflows.
-      3. Adds aggregate summary (type counts, folder distribution, etc.).
-      4. Samples items representatively across types (not just first N).
-      5. Strips verbose metadata from sampled items.
-      6. Uses binary search to find the largest sample that fits.
-      7. Falls back to hard truncation if nothing else works.
+      2. Adds aggregate summary (type counts, folder distribution, etc.).
+      3. Samples items representatively across types (not just first N).
+      4. Strips verbose metadata from sampled items.
+      5. Uses binary search to find the largest sample that fits.
+      6. Falls back to hard truncation if nothing else works.
 
     Args:
         result: The tool result dict.
@@ -165,7 +155,6 @@ def truncate_result(result: Dict[str, Any], max_chars: int = 8000) -> str:
     Returns:
         JSON string of the result, possibly truncated.
     """
-    result = _strip_ui_grid(result)
     serialized = json.dumps(result, indent=2, default=str)
 
     if len(serialized) <= max_chars:
