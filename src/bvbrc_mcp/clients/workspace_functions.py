@@ -7,6 +7,7 @@ import os
 import json
 import sys
 import base64
+import re
 
 import os
 
@@ -32,34 +33,6 @@ def _flatten_ls_result(result) -> list:
         and not str(item[0]).startswith(".")
     ]
 
-
-def _build_grid_payload(
-    entity_type: str,
-    items: list = None,
-    result_type: str = "list_result",
-    pagination: dict = None,
-    sort: dict = None,
-    source: str = "bvbrc-workspace",
-    columns: list = None,
-    selectable: bool = True,
-    multi_select: bool = True,
-    sortable: bool = True
-) -> dict:
-    return {
-        "schema_version": "1.0",
-        "entity_type": entity_type,
-        "source": source,
-        "result_type": result_type,
-        "capabilities": {
-            "selectable": selectable,
-            "multi_select": multi_select,
-            "sortable": sortable
-        },
-        "pagination": pagination,
-        "sort": sort,
-        "columns": columns or [],
-        "items": items or []
-    }
 
 def _fix_duplicated_user_id_in_path(path: str, user_id: str) -> str:
     """
@@ -122,7 +95,7 @@ async def workspace_ls(
                     If provided, only files/objects with these types will be returned.
         sort_by: Optional sort field. Valid options: creation_time, name, size, type.
         sort_order: Optional sort direction. Valid options: asc, desc.
-        limit: Optional maximum number of results to return (server-side limiting).
+        limit: Passed to the service, which ignores it (callers must cap the result).
     Returns:
         List of workspace items
     """
@@ -180,24 +153,7 @@ async def workspace_ls(
             "items": flat_items,
             "count": len(flat_items),
             "path": paths[0] if paths else "/",
-            "source": "bvbrc-workspace",
-            "ui_grid": _build_grid_payload(
-                entity_type="workspace_item",
-                items=flat_items,
-                result_type="list_result",
-                source="bvbrc-workspace",
-                sort={"sort_by": sort_by, "sort_order": sort_order},
-                pagination={"limit": limit, "offset": 0, "has_more": None},
-                columns=[
-                    {"key": "name", "label": "Name", "sortable": True},
-                    {"key": "type", "label": "Type", "sortable": True},
-                    {"key": "creation_time", "label": "Created", "sortable": True},
-                    {"key": "size", "label": "Size", "sortable": True}
-                ],
-                selectable=True,
-                multi_select=True,
-                sortable=True
-            )
+            "source": "bvbrc-workspace"
         }
     except Exception as e:
         if "Object not found" in str(e):
@@ -212,6 +168,35 @@ async def workspace_ls(
             "source": "bvbrc-workspace"
         }
 
+NAME_MATCH_MODES = ("all", "any", "word")
+
+
+def name_regex(terms: List[str] = None, extensions: List[str] = None, mode: str = "all") -> str:
+    """One case-insensitive regex for name terms and extensions.
+
+    Used as the ``Workspace.ls`` query (Mongo/PCRE) and, with Python's ``re``,
+    on our side, so both match the same names. Terms are literal text
+    (escaped: ``TanA+`` or ``sample (1)`` used to be sent as regex). *mode*:
+    ``all`` = every term, ``any`` = at least one, ``word`` = every term as a
+    whole word, where only letters count as word characters, so
+    ``Bacillus_group_1`` matches "bacillus" and ``Lactobacillus`` does not.
+    Extensions: the name ends with any of them. Returns "" for no filter.
+    """
+    terms = [re.escape(str(t)) for t in (terms or []) if str(t or "").strip()]
+    exts = [re.escape(str(e).lstrip(".")) for e in (extensions or []) if str(e or "").strip(".").strip()]
+    if mode == "word":
+        terms = [f"(?<![a-z]){t}(?![a-z])" for t in terms]
+    if not terms:
+        lookaheads = ""
+    elif mode == "any":
+        lookaheads = "(?=.*(?:" + "|".join(terms) + "))"
+    else:
+        lookaheads = "".join(f"(?=.*{t})" for t in terms)
+    if exts:
+        return lookaheads + r".*\.(?:" + "|".join(exts) + ")$"
+    return lookaheads
+
+
 async def workspace_search(
     api: JsonRpcCaller,
     paths: List[str] = None,
@@ -221,7 +206,8 @@ async def workspace_search(
     token: str = None,
     sort_by: str = None,
     sort_order: str = None,
-    limit: int = None
+    limit: int = None,
+    name_match: str = "all"
 ) -> dict:
     """
     Search the entire workspace for a given term and/or file extension and/or file type.
@@ -239,7 +225,8 @@ async def workspace_search(
         token: Authentication token for API calls
         sort_by: Optional sort field. Valid options: creation_time, name, size, type.
         sort_order: Optional sort direction. Valid options: asc, desc.
-        limit: Optional maximum number of results to return (server-side limiting).
+        limit: Passed to the service, which ignores it (callers must cap the result).
+        name_match: How the search terms combine: "all", "any", or "word" (all, whole words); see ``name_regex``.
     Returns:
         List of matching workspace items
     """
@@ -258,133 +245,16 @@ async def workspace_search(
         if user_id:
             paths = _fix_duplicated_user_id_in_paths(paths, user_id)
 
-    # Build query conditions based on what's provided
+    name_pattern = name_regex(filename_search_terms, file_extension, name_match)
     query_conditions = {}
-    name_conditions = []
-    type_conditions = []
-
-    # Add filename search term condition(s) if provided
-    if filename_search_terms:
-        # filename_search_terms is already a list
-        name_conditions.extend(filename_search_terms)
-
-    # Add file extension filter(s) if provided
-    if file_extension:
-        # file_extension is already a list
-        for ext in file_extension:
-            # Normalize extension: remove leading dot if present, add it back for regex
-            ext = ext.lstrip('.')
-            # Create regex pattern that matches files ending with the extension
-            # This ensures we match the extension at the end of the filename
-            ext_pattern = f"\\.{ext}$"
-            name_conditions.append(ext_pattern)
-
-    # Add file type filter if provided
+    if name_pattern:
+        query_conditions["name"] = {"$regex": name_pattern, "$options": "i"}
     if file_types:
-        # file_types is already a list
-        # Pass type as array directly (API expects array format for type filtering),
-        # consistent with workspace_ls behavior.
-        type_conditions.append({
-            "type": file_types
-        })
-
-    # Build final query conditions
-    # NOTE: The workspace API does not support $and operator despite using MongoDB syntax.
-    # Instead, we combine multiple name-based regex patterns into a single regex using lookahead.
-    if len(name_conditions) == 0 and len(type_conditions) == 0:
+        # Pass type as array directly (API expects array format for type filtering).
+        query_conditions["type"] = file_types
+    if not query_conditions:
         # No explicit filters: perform recursive search under provided paths
         query_conditions = None
-    elif len(name_conditions) > 0 and len(type_conditions) == 0:
-        # Only name-based filters
-        if len(name_conditions) == 1:
-            # Single name condition
-            query_conditions = {
-                "name": {
-                    "$regex": name_conditions[0],
-                    "$options": "i"
-                }
-            }
-        else:
-            # Multiple name conditions: combine using regex lookahead
-            # Pattern: (?=.*pattern1)(?=.*pattern2)....*
-            # For extension patterns ending with $, we need special handling
-            combined_pattern = ""
-            end_patterns = []
-
-            for pattern in name_conditions:
-                if pattern.endswith("$"):
-                    # Extension pattern - save for end (OR logic for multiple extensions)
-                    end_patterns.append(pattern)
-                else:
-                    # Search term - add as lookahead (AND logic for multiple terms)
-                    combined_pattern += f"(?=.*{pattern})"
-
-            if end_patterns:
-                # Combine lookaheads with the end-anchored pattern(s)
-                if len(end_patterns) > 1:
-                    # Multiple extensions: OR them together
-                    ext_or_pattern = "(" + "|".join(end_patterns) + ")"
-                    combined_pattern += ".*" + ext_or_pattern
-                else:
-                    # Single extension
-                    combined_pattern += ".*" + end_patterns[0]
-            else:
-                # No end anchor, just match anything after lookaheads
-                combined_pattern += ".*"
-
-            query_conditions = {
-                "name": {
-                    "$regex": combined_pattern,
-                    "$options": "i"
-                }
-            }
-    elif len(name_conditions) == 0 and len(type_conditions) > 0:
-        # Only type-based filters
-        query_conditions = type_conditions[0]
-    else:
-        # Both name and type conditions
-        # Since we can't use $and, we need to handle this differently
-        # We'll apply name filter in the query and filter by type client-side after
-        # Actually, let's try putting both in a dict - MongoDB should support multiple fields
-        if len(name_conditions) == 1:
-            name_regex = name_conditions[0]
-        else:
-            # Combine name conditions
-            combined_pattern = ""
-            end_patterns = []
-
-            for pattern in name_conditions:
-                if pattern.endswith("$"):
-                    # Extension pattern - save for end (OR logic for multiple extensions)
-                    end_patterns.append(pattern)
-                else:
-                    # Search term - add as lookahead (AND logic for multiple terms)
-                    combined_pattern += f"(?=.*{pattern})"
-
-            if end_patterns:
-                # Combine lookaheads with the end-anchored pattern(s)
-                if len(end_patterns) > 1:
-                    # Multiple extensions: OR them together
-                    ext_or_pattern = "(" + "|".join(end_patterns) + ")"
-                    combined_pattern += ".*" + ext_or_pattern
-                else:
-                    # Single extension
-                    combined_pattern += ".*" + end_patterns[0]
-            else:
-                # No end anchor, just match anything after lookaheads
-                combined_pattern += ".*"
-
-            name_regex = combined_pattern
-
-        # Try combining name and type in a single dict (implicit AND in MongoDB)
-        query_conditions = {
-            "name": {
-                "$regex": name_regex,
-                "$options": "i"
-            }
-        }
-        # Add type condition to the same dict
-        query_conditions.update(type_conditions[0])
 
     try:
         api_params = {
@@ -413,24 +283,7 @@ async def workspace_search(
             "count": len(flat_items),
             "filename_search_terms": filename_search_terms,
             "paths": paths,
-            "source": "bvbrc-workspace",
-            "ui_grid": _build_grid_payload(
-                entity_type="workspace_item",
-                items=flat_items,
-                result_type="search_result",
-                source="bvbrc-workspace",
-                sort={"sort_by": sort_by, "sort_order": sort_order},
-                pagination={"limit": limit, "offset": 0, "has_more": None},
-                columns=[
-                    {"key": "name", "label": "Name", "sortable": True},
-                    {"key": "type", "label": "Type", "sortable": True},
-                    {"key": "creation_time", "label": "Created", "sortable": True},
-                    {"key": "size", "label": "Size", "sortable": True}
-                ],
-                selectable=True,
-                multi_select=True,
-                sortable=True
-            )
+            "source": "bvbrc-workspace"
         }
     except Exception as e:
         if "Object not found" in str(e):
@@ -445,6 +298,132 @@ async def workspace_search(
             "source": "bvbrc-workspace"
         }
 
+# Workspace.ls tuple: [name, type, parent_path, creation_time, id, owner, size, ...]
+_SORT_INDEX = {"name": 0, "type": 1, "creation_time": 3, "size": 6}
+_SUMMARY_TOP = 15
+_MAX_PARALLEL_ROOTS = 8
+
+
+def _sort_pairs(pairs: list, sort_by: str = None, sort_order: str = None, search: bool = False) -> list:
+    """Sort ``(root, tuple)`` pairs by the tuple's field, on our side.
+
+    Done here so that "the first N" after the cap means the requested order.
+    Without *sort_by*: a search shows the newest first, a folder listing
+    shows folders first and then names (as the website does). The service's
+    own order is unspecified.
+    """
+    idx = _SORT_INDEX.get(sort_by)
+    if idx is None:
+        if search:
+            return sorted(pairs, key=lambda p: str(p[1][3] if len(p[1]) > 3 else "") or "", reverse=True)
+        return sorted(pairs, key=lambda p: (p[1][1] != "folder" if len(p[1]) > 1 else True,
+                                            str(p[1][0] or "").lower()))
+
+    def key(pair):
+        item = pair[1]
+        value = item[idx] if len(item) > idx else None
+        if idx == 6:
+            try:
+                return (0, float(value))
+            except (TypeError, ValueError):
+                return (1, 0.0)
+        return (0, str(value or "").lower())
+
+    return sorted(pairs, key=key, reverse=(sort_order == "desc"))
+
+
+def _rel_segments(item: list, root: str) -> List[str]:
+    """Folder names between *root* and the item (empty for a direct child)."""
+    parent = str(item[2] or "") if len(item) > 2 else ""
+    root = root.rstrip("/")
+    rel = parent[len(root):] if parent.startswith(root) else parent
+    return [seg for seg in rel.split("/") if seg]
+
+
+def _in_hidden_folder(item: list, root: str) -> bool:
+    """True when the item lies inside a dot-folder below *root*.
+
+    Dot-folders are job output folders (``.<job name>/``) and ``.chats/``.
+    Only the part below the search root counts, so browsing inside a job
+    output folder on purpose still finds its files.
+    """
+    return any(seg.startswith(".") for seg in _rel_segments(item, root))
+
+
+def _matches_filters(item: list, name_pattern: Any = None, types: List[str] = None) -> bool:
+    """The search filters, applied on our side to a one-folder listing.
+
+    *name_pattern* is the compiled ``name_regex`` the service gets for a
+    search, so both match the same names; any type.
+    """
+    if name_pattern is not None and not name_pattern.search(str(item[0] or "")):
+        return False
+    if types and (len(item) < 2 or item[1] not in types):
+        return False
+    return True
+
+
+_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2})?Z?)?$")
+
+
+def valid_date(value: Any) -> bool:
+    """``YYYY-MM-DD`` or ``YYYY-MM-DDTHH:MM[:SS][Z]`` (compared as text with the
+    ISO creation times ``Workspace.ls`` returns)."""
+    return bool(_DATE.match(str(value or "")))
+
+
+def _in_date_range(item: list, created_after: str = None, created_before: str = None) -> bool:
+    """Created on/after *created_after* and before *created_before* (ISO text)."""
+    ctime = str(item[3] or "") if len(item) > 3 else ""
+    if created_after and not (ctime and ctime >= created_after):
+        return False
+    if created_before and not (ctime and ctime < created_before):
+        return False
+    return True
+
+
+def _top_counts(counts: dict) -> dict:
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], str(kv[0])))
+    out = dict(ranked[:_SUMMARY_TOP])
+    if len(ranked) > _SUMMARY_TOP:
+        out["(others)"] = sum(n for _, n in ranked[_SUMMARY_TOP:])
+    return out
+
+
+def _summarize_items(pairs: list, by_folder: bool, by_root: bool) -> dict:
+    """Counts by type, total size, oldest/newest; by subfolder (one-root
+    search) or by root (several roots)."""
+    by_type: dict = {}
+    folders: dict = {}
+    roots: dict = {}
+    size = 0
+    times = []
+    for root, item in pairs:
+        typ = item[1] if len(item) > 1 else None
+        by_type[typ] = by_type.get(typ, 0) + 1
+        try:
+            size += int(item[6] or 0)
+        except (TypeError, ValueError, IndexError):
+            pass
+        if len(item) > 3 and item[3]:
+            times.append(str(item[3]))
+        if by_root:
+            roots[root] = roots.get(root, 0) + 1
+        elif by_folder:
+            segs = _rel_segments(item, root)
+            top = segs[0] if segs else "(this folder)"
+            folders[top] = folders.get(top, 0) + 1
+
+    summary = {"by_type": _top_counts(by_type), "total_size": size}
+    if times:
+        summary["oldest"], summary["newest"] = min(times), max(times)
+    if by_root:
+        summary["by_root"] = _top_counts(roots)
+    elif by_folder:
+        summary["by_folder"] = _top_counts(folders)
+    return summary
+
+
 async def workspace_browse(
     api: JsonRpcCaller,
     token: str,
@@ -456,26 +435,51 @@ async def workspace_browse(
     sort_by: str = None,
     sort_order: str = None,
     num_results: int = 50,
+    offset: int = 0,
+    recursive: bool = None,
+    max_depth: int = None,
+    include_job_outputs: bool = False,
+    paths: List[str] = None,
+    name_match: str = "all",
+    created_after: str = None,
+    created_before: str = None,
     tool_name: str = "workspace_browse_tool"
 ) -> dict:
     """
     Unified workspace browser entrypoint.
 
-    - If search is True: perform recursive search under path (or user home by default).
-    - If search is False: inspect path and return folder listing or file/object metadata.
+    - recursive=True: search everything under path (or user home by default).
+    - recursive=False: inspect path and return its folder listing or the
+      file/object metadata. Filters apply to that one folder.
+    - recursive=None (not given): recursive when *search* or any filter is set
+      (the behaviour before ``recursive`` existed).
+    - *paths* (two or more): list or search each of them (in parallel, one
+      ``Workspace.ls`` per root, so an unreadable root does not sink the
+      others); every result item keeps its full path, the summary counts by
+      root, and roots that failed are listed in ``unreadable``.
+
+    ``Workspace.ls`` ignores ``limit`` and ``offset`` and always returns
+    everything, so results are filtered, sorted and paged here.
 
     Args:
         api: JsonRpcCaller instance configured with workspace URL and token
         token: Authentication token for API calls
         path: Path to inspect/search. Defaults to user home if not provided.
-        search: If True, perform recursive search. If False, inspect path and return listing or metadata.
-        filename_search_terms: Optional list of terms to search within file/object names (used when search=True).
-                               All terms must appear in the filename (AND logic).
-        file_extension: Optional list of extension filters (used when search=True). Multiple extensions use OR logic.
-        file_types: Optional list of workspace type filters (used in search and folder listing modes).
+        search: Old switch for recursive search; used only when *recursive* is None.
+        filename_search_terms: Terms that must all appear in the name (case-insensitive).
+        file_extension: Extension filters (OR logic).
+        file_types: Workspace type filters (OR logic).
         sort_by: Optional sort field. Valid options: creation_time, name, size, type.
         sort_order: Optional sort direction. Valid options: asc, desc.
-        num_results: Maximum number of results to return. Defaults to 50.
+        num_results: Page size. Defaults to 50.
+        offset: Index of the first item to return (from a previous ``next_offset``).
+        recursive: Search under path instead of listing it.
+        max_depth: With recursive, how many folder levels below path to search
+                   (0 = path itself only, 1 = its subfolders too, ...).
+        include_job_outputs: Search inside hidden folders (job outputs, ``.chats``) too.
+        paths: Several folders at once (overrides *path* when it has 2+ entries).
+        name_match: How name terms combine: "all", "any", or "word" (see ``name_regex``).
+        created_after / created_before: ISO date range (after inclusive, before exclusive).
         tool_name: Name of the calling tool (for response envelope).
 
     Returns a consistent response envelope with all data nested under "result":
@@ -484,8 +488,13 @@ async def workspace_browse(
           "items": <array> | "metadata": <dict>,  // items for search/list, metadata for file/object
           "tool_name": <tool name>,
           "result_type": "search_result" | "list_result" | "metadata_result",
-          "count": <number>,  // present for search_result and list_result
-          "path": <workspace path>,
+          "count": <number>,      // items returned (search/list)
+          "total": <number>,      // items matched (search/list)
+          "truncated": <bool>,    // more matched than returned (search/list)
+          "offset", "next_offset": paging (next_offset only when more remain)
+          "summary": {by_type, total_size, oldest, newest, by_folder | by_root}
+          "hidden_in_job_outputs": <number>,  // search only, when > 0
+          "path": <workspace path> | "paths": [<roots>], "unreadable": [...]
           "source": "bvbrc-workspace"
         }
       }
@@ -497,7 +506,11 @@ async def workspace_browse(
             "source": "bvbrc-workspace"
         }
 
-    if not path or path == '/':
+    roots = list(dict.fromkeys(p for p in (paths or []) if p))
+    if len(roots) == 1:
+        path, roots = roots[0], []
+
+    if not roots and (not path or path == '/'):
         user_id = _get_user_id_from_token(token)
         if not user_id:
             return {
@@ -507,142 +520,138 @@ async def workspace_browse(
             }
         path = f"/{user_id}/home"
 
-    # Auto-detect search mode when any filters are provided
+    offset = max(0, int(offset or 0))
+
+    def _items_response(pairs: list, result_type: str, hidden: int = 0, unreadable: list = None) -> dict:
+        pairs = _sort_pairs(pairs, sort_by, sort_order, search=(result_type == "search_result"))
+        total = len(pairs)
+        page = [item for _, item in pairs[offset:offset + num_results]]
+        end = offset + len(page)
+        result = {
+            "items": page,
+            "tool_name": tool_name,
+            "result_type": result_type,
+            "count": len(page),
+            "total": total,
+            "truncated": total > len(page),
+            "offset": offset,
+        }
+        if roots:
+            result["paths"] = roots
+        else:
+            result["path"] = path
+        result["summary"] = _summarize_items(pairs, by_folder=(result_type == "search_result"), by_root=bool(roots))
+        result["source"] = "bvbrc-workspace"
+        hints = []
+        if end < total:
+            result["next_offset"] = end
+        if result["truncated"]:
+            shown = f"items {offset + 1}-{end}" if page else "no items"
+            hints.append(
+                f"Showing {shown} of {total}. The others exist but are not in this result: "
+                "describe them from summary, say the list is partial, narrow it (filters, a "
+                "subfolder) or fetch the next page with offset=next_offset if the user needs it."
+            )
+        if hidden:
+            result["hidden_in_job_outputs"] = hidden
+            hints.append(
+                f"{hidden} more match{'es' if hidden != 1 else ''} inside job output folders "
+                "(left out; pass include_job_outputs=true to include them)."
+            )
+        if unreadable:
+            result["unreadable"] = unreadable
+            hints.append(f"{len(unreadable)} folder(s) could not be read; see unreadable.")
+        if hints:
+            result["hint"] = " ".join(hints)
+        return {"result": result}
+
+    def _keep(pairs: list) -> tuple:
+        """Apply the date range, max_depth and the job-output rule;
+        returns (pairs, hidden), so ``hidden`` counts only full matches."""
+        pairs = [(r, i) for r, i in pairs if _passes(i)]
+        if max_depth is not None:
+            pairs = [(r, i) for r, i in pairs if len(_rel_segments(i, r)) <= max(0, int(max_depth))]
+        if include_job_outputs:
+            return pairs, 0
+        kept = [(r, i) for r, i in pairs if not _in_hidden_folder(i, r)]
+        return kept, len(pairs) - len(kept)
+
     has_filters = bool(filename_search_terms) or bool(file_extension) or bool(file_types)
-    if search or has_filters:
-        search_result = await workspace_search(
+    pattern = name_regex(filename_search_terms, file_extension, name_match)
+    name_pattern = re.compile(pattern, re.IGNORECASE) if pattern else None
+    if recursive is None:
+        recursive = bool(search or has_filters)
+        if has_filters:
+            print(f"workspace_browse: filters without recursive -> recursive search of {roots or path}", file=sys.stderr)
+
+    async def _search(root: str) -> dict:
+        return await workspace_search(
             api=api,
-            paths=[path],
+            paths=[root],
             filename_search_terms=filename_search_terms,
             file_extension=file_extension,
             file_types=file_types,
             token=token,
             sort_by=sort_by,
             sort_order=sort_order,
-            limit=num_results  # Pass limit to server-side
+            name_match=name_match,
         )
+
+    async def _list(root: str) -> dict:
+        return await workspace_ls(api=api, paths=[root], token=token, sort_by=sort_by, sort_order=sort_order)
+
+    def _passes(item: list) -> bool:
+        return _in_date_range(item, created_after, created_before)
+
+    def _listing(list_result: dict) -> List[list]:
+        items = [i for i in list_result.get("items", []) if _passes(i)]
+        if has_filters:
+            items = [i for i in items if _matches_filters(i, name_pattern, file_types)]
+        return items
+
+    if roots:
+        gate = asyncio.Semaphore(_MAX_PARALLEL_ROOTS)
+
+        async def one(root: str) -> tuple:
+            async with gate:
+                return root, await (_search(root) if recursive else _list(root))
+
+        pairs, unreadable = [], []
+        for root, res in await asyncio.gather(*(one(r) for r in roots)):
+            if "error" in res:
+                unreadable.append({"path": root, "error": res.get("error")})
+                continue
+            items = res.get("items", []) if recursive else _listing(res)
+            pairs.extend((root, i) for i in items)
+        if len(unreadable) == len(roots):
+            return {
+                "error": f"None of the {len(roots)} folders could be read.",
+                "errorType": "API_ERROR",
+                "unreadable": unreadable,
+                "source": "bvbrc-workspace",
+            }
+        hidden = 0
+        if recursive:
+            pairs, hidden = _keep(pairs)
+        return _items_response(pairs, "search_result" if recursive else "list_result", hidden, unreadable)
+
+    if recursive:
+        search_result = await _search(path)
         if "error" in search_result:
             return search_result
-
-        items = search_result.get("items", [])
-        # Server-side limiting via limit parameter, no client-side slicing needed
-        return {
-            "result": {
-                "items": items,
-                "tool_name": tool_name,
-                "result_type": "search_result",
-                "count": len(items),
-                "path": path,
-                "source": "bvbrc-workspace",
-                "ui_grid": _build_grid_payload(
-                    entity_type="workspace_item",
-                    items=items,
-                    result_type="search_result",
-                    source="bvbrc-workspace",
-                    sort={"sort_by": sort_by, "sort_order": sort_order},
-                    pagination={"limit": num_results, "offset": 0, "has_more": None},
-                    columns=[
-                        {"key": "name", "label": "Name", "sortable": True},
-                        {"key": "type", "label": "Type", "sortable": True},
-                        {"key": "creation_time", "label": "Created", "sortable": True},
-                        {"key": "size", "label": "Size", "sortable": True}
-                    ]
-                )
-            },
-            "call": {
-                "tool": tool_name,
-                "backend_method": "Workspace.ls",
-                "arguments_executed": {
-                    "path": path,
-                    "search": True,
-                    "filename_search_terms": filename_search_terms,
-                    "file_extension": file_extension,
-                    "file_types": file_types,
-                    "sort_by": sort_by,
-                    "sort_order": sort_order,
-                    "num_results": num_results
-                },
-                "replayable": True,
-                "replay": {
-                    "path": path,
-                    "name_contains": filename_search_terms,
-                    "file_extensions": file_extension,
-                    "workspace_types": file_types,
-                    "sort_by": sort_by,
-                    "sort_order": sort_order,
-                    "num_results": num_results
-                }
-            }
-        }
-
-    def _build_list_response(items: List[dict], result_path: str) -> dict:
-        return {
-            "result": {
-                "items": items,
-                "tool_name": tool_name,
-                "result_type": "list_result",
-                "count": len(items),
-                "path": result_path,
-                "source": "bvbrc-workspace",
-                "ui_grid": _build_grid_payload(
-                    entity_type="workspace_item",
-                    items=items,
-                    result_type="list_result",
-                    source="bvbrc-workspace",
-                    sort={"sort_by": sort_by, "sort_order": sort_order},
-                    pagination={"limit": num_results, "offset": 0, "has_more": None},
-                    columns=[
-                        {"key": "name", "label": "Name", "sortable": True},
-                        {"key": "type", "label": "Type", "sortable": True},
-                        {"key": "creation_time", "label": "Created", "sortable": True},
-                        {"key": "size", "label": "Size", "sortable": True}
-                    ]
-                )
-            },
-            "call": {
-                "tool": tool_name,
-                "backend_method": "Workspace.ls",
-                "arguments_executed": {
-                    "path": result_path,
-                    "search": False,
-                    "file_types": file_types,
-                    "sort_by": sort_by,
-                    "sort_order": sort_order,
-                    "num_results": num_results
-                },
-                "replayable": True,
-                "replay": {
-                    "path": result_path,
-                    "name_contains": None,
-                    "file_extensions": None,
-                    "workspace_types": file_types,
-                    "sort_by": sort_by,
-                    "sort_order": sort_order,
-                    "num_results": num_results
-                }
-            }
-        }
+        pairs, hidden = _keep([(path, i) for i in search_result.get("items", [])])
+        return _items_response(pairs, "search_result", hidden)
 
     # Handle all public browsing in one branch. Workspace.get can fail for valid
     # public directories, so prefer Workspace.ls here.
     if path.startswith("/public"):
         # Keep /public as-is; requesting "/" can trigger permission errors.
-        list_path = path
-        list_result = await workspace_ls(
-            api=api,
-            paths=[list_path],
-            token=token,
-            file_types=file_types,
-            sort_by=sort_by,
-            sort_order=sort_order,
-            limit=num_results
-        )
+        list_result = await _list(path)
         if "error" in list_result:
             # Do not fall through to Workspace.get on public listing failures.
             # Returning the original listing error preserves the real failure cause.
             return list_result
-        items = list_result.get("items", [])
-        return _build_list_response(items, path)
+        return _items_response([(path, i) for i in _listing(list_result)], "list_result")
 
     metadata_result = await workspace_get_object(api, path, metadata_only=True, token=token)
     if "error" in metadata_result:
@@ -660,21 +669,10 @@ async def workspace_browse(
     is_folder = metadata.get("type") == "folder" or auto_meta.get("is_folder") == 1
 
     if is_folder:
-        list_result = await workspace_ls(
-            api=api,
-            paths=[path],
-            token=token,
-            file_types=file_types,
-            sort_by=sort_by,
-            sort_order=sort_order,
-            limit=num_results  # Pass limit to server-side
-        )
+        list_result = await _list(path)
         if "error" in list_result:
             return list_result
-
-        items = list_result.get("items", [])
-        # Server-side limiting via limit parameter, no client-side slicing needed
-        return _build_list_response(items, path)
+        return _items_response([(path, i) for i in _listing(list_result)], "list_result")
 
     return {
         "result": {
@@ -683,41 +681,9 @@ async def workspace_browse(
             "result_type": "metadata_result",
             "path": path,
             "source": "bvbrc-workspace",
-            "ui_grid": _build_grid_payload(
-                entity_type="workspace_metadata",
-                items=[metadata],
-                result_type="metadata_result",
-                source="bvbrc-workspace",
-                columns=[
-                    {"key": "name", "label": "Name", "sortable": False},
-                    {"key": "type", "label": "Type", "sortable": False},
-                    {"key": "creation_time", "label": "Created", "sortable": False},
-                    {"key": "size", "label": "Size", "sortable": False}
-                ],
-                selectable=False,
-                multi_select=False,
-                sortable=False
-            )
-        },
-        "call": {
-            "tool": tool_name,
-            "backend_method": "Workspace.get",
-            "arguments_executed": {
-                "path": path,
-                "search": False
-            },
-            "replayable": True,
-            "replay": {
-                "path": path,
-                "name_contains": None,
-                "file_extensions": None,
-                "workspace_types": file_types,
-                "sort_by": sort_by,
-                "sort_order": sort_order,
-                "num_results": num_results
-            }
         }
     }
+
 
 async def workspace_get_file_metadata(api: JsonRpcCaller, path: str, token: str) -> dict:
     """

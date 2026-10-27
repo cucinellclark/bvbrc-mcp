@@ -344,9 +344,13 @@ WORKSPACE_BROWSE = {
         "name": "workspace_browse",
         "description": (
             "Browse and search files in the user's BV-BRC cloud workspace. "
-            "Use this to list folder contents, find files by name, type, or "
-            "extension. Without filters, lists the immediate contents of the "
-            "given path. With filters, performs a recursive search. "
+            "Lists one folder's contents (recursive=false, the default), or "
+            "searches everything under a folder (recursive=true). Filters "
+            "(name_contains, file_extensions, workspace_types) work in both. "
+            "Results give total (how many matched), summary (counts by type "
+            "and, for a search, by subfolder) and next_offset when there are "
+            "more pages: describe a large folder from summary, and say so "
+            "when the items shown are only part of it. "
             "Other users' folders work too: pass their full path "
             "(/<owner>@<realm>/<workspace>/...). To find them, use scope."
         ),
@@ -364,57 +368,71 @@ WORKSPACE_BROWSE = {
                         "Leave empty or omit to browse the home directory root."
                     ),
                 },
+                "paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Several folders to list or search in one call "
+                        "(instead of path; up to 50). Each item keeps its "
+                        "full path; summary.by_root counts per folder."
+                    ),
+                },
                 "scope": {
                     "type": "string",
                     "enum": ["shared", "public"],
                     "description": (
-                        "List other users' top-level workspaces instead of a "
-                        "path: 'shared' = shared with this user, 'public' = "
-                        "public workspaces (several hundred; filter with "
-                        "name_contains, which matches the workspace name or "
-                        "its owner). Omit to browse a path."
+                        "Other users' workspaces instead of a path. Alone: "
+                        "lists their top-level workspaces ('shared' = shared "
+                        "with this user, 'public' = several hundred public "
+                        "ones; name_contains then matches the workspace name "
+                        "or owner). 'shared' with recursive=true searches "
+                        "INSIDE every shared workspace in one call (filters "
+                        "then match file names): use it for 'do any shared "
+                        "workspaces have X'. Public workspaces are found by "
+                        "name only; their contents are never searched. Omit "
+                        "to browse a path."
                     ),
                 },
                 "name_contains": {
                     "type": "array",
                     "items": {"type": "string"},
                     "description": (
-                        "Literal substrings that must appear in the filename "
-                        "(AND logic). ONLY use for actual filename text the "
-                        "user specifies (e.g., 'sample1', 'ecoli'). NEVER "
-                        "put file type categories here -- use workspace_types "
-                        "or file_extensions instead."
+                        "Literal text that must appear in the name (case-"
+                        "insensitive; how several terms combine: name_match). "
+                        "ONLY use for actual name text the user specifies "
+                        "(e.g., 'sample1', 'ecoli'). NEVER put file type "
+                        "categories here -- use workspace_types or "
+                        "file_extensions instead."
                     ),
                 },
-                "file_extensions": {
-                    "type": "array",
-                    "items": {"type": "string"},
+                "name_match": {
+                    "type": "string",
+                    "enum": ["all", "any", "word"],
                     "description": (
-                        "File extensions to match (OR logic). Example: "
-                        "['fastq', 'fq'] finds .fastq OR .fq files. "
-                        "Do NOT combine with workspace_types for the same "
-                        "file category."
+                        "'all' (default): every name_contains term appears. "
+                        "'any': at least one; use it for synonyms in ONE "
+                        "call, e.g. ['influenza', 'flu', 'H5N1']. 'word': "
+                        "every term as a whole word ('Bacillus' then does not "
+                        "match 'Lactobacillus')."
                     ),
                 },
-                "workspace_types": {
-                    "type": "array",
-                    "items": {
-                        "type": "string",
-                        "enum": WORKSPACE_TYPES,
-                    },
+                "created_after": {
+                    "type": "string",
                     "description": (
-                        "Workspace object types to match (OR logic). This is "
-                        "the PREFERRED way to find files by category. Examples: "
-                        "'reads' for sequencing data, 'feature_protein_fasta' "
-                        "for protein FASTA files, 'gff' for annotations. "
-                        "When the user asks for files of a type, use ONLY "
-                        "workspace_types -- do not also set name_contains."
+                        "Only items created on or after this date "
+                        "(YYYY-MM-DD). Work out the date from today's date "
+                        "for 'last week', 'this month'."
                     ),
+                },
+                "created_before": {
+                    "type": "string",
+                    "description": "Only items created before this date (YYYY-MM-DD).",
                 },
                 "sort_by": {
                     "type": "string",
                     "description": (
-                        "Sort field. Valid: creation_time, name, size, type."
+                        "Sort field. Default: a listing shows folders first, "
+                        "then by name; a search shows the newest first."
                     ),
                     "enum": ["creation_time", "name", "size", "type"],
                 },
@@ -425,8 +443,49 @@ WORKSPACE_BROWSE = {
                 },
                 "num_results": {
                     "type": "integer",
-                    "description": "Maximum number of results to return. Default 50.",
+                    "description": (
+                        "Maximum number of results to return (default 50, "
+                        "max 500). The result's total says how many matched; "
+                        "when truncated is true, say the list is partial."
+                    ),
                     "default": 50,
+                },
+                "recursive": {
+                    "type": "boolean",
+                    "description": (
+                        "true = search every folder under path (to find "
+                        "files when you don't know which folder they are "
+                        "in); false = list path only. Set it explicitly. "
+                        "Searching home can return thousands of items."
+                    ),
+                },
+                "max_depth": {
+                    "type": "integer",
+                    "description": (
+                        "With recursive=true: how many folder levels below "
+                        "path to search (1 = path and its subfolders). Omit "
+                        "for no limit."
+                    ),
+                },
+                "offset": {
+                    "type": "integer",
+                    "description": (
+                        "First item to return. Pass the previous result's "
+                        "next_offset to get the next page; only when the "
+                        "user needs the rest."
+                    ),
+                    "default": 0,
+                },
+                "include_job_outputs": {
+                    "type": "boolean",
+                    "description": (
+                        "Searches leave out files inside job output folders "
+                        "(hidden .<job name> folders) by default; the result's "
+                        "hidden_in_job_outputs counts them. Set true only when "
+                        "the user wants files produced by jobs, e.g. contigs "
+                        "from assembly jobs."
+                    ),
+                    "default": False,
                 },
             },
             "required": [],
@@ -1266,12 +1325,15 @@ LIST_JOBS = {
         "description": (
             "List the user's BV-BRC jobs with optional filtering, sorting, and "
             "pagination. Use this to answer questions like 'show my recent jobs', "
-            "'what jobs are running', 'list failed jobs', or 'find my assembly jobs'. "
-            "Returns job summaries (status, service, submit time, etc.).\n\n"
+            "'what jobs are running', 'list failed jobs', 'find my assembly jobs' or "
+            "'where are my <service> results'. Each job gives its status, times, "
+            "inputs and where its results are (result_path, output_folder), "
+            "wherever in the workspace they were written.\n\n"
             "USE THIS TOOL FOR:\n"
             "- Listing recent jobs or job history\n"
             "- Finding jobs by status (completed, running, failed)\n"
             "- Finding jobs by service type (genome_assembly, blast, etc.)\n"
+            "- Finding where a service's results are\n"
             "- Searching jobs by name or description\n"
             "- Paginated browsing of the job queue\n\n"
             "DO NOT USE THIS TOOL FOR:\n"
@@ -1315,8 +1377,11 @@ LIST_JOBS = {
                 "service": {
                     "type": "string",
                     "description": (
-                        "Filter by service name. Examples: 'genome_assembly', "
-                        "'blast', 'genome_annotation', 'rnaseq', 'variation'."
+                        "Filter by service: an app id ('GenomeAssembly2', "
+                        "'CodonTree', 'RNASeq') or a common name "
+                        "('genome_assembly', 'blast', 'rnaseq'). A partial "
+                        "name that fits up to 4 services ('tree') lists their "
+                        "jobs together (total_by_service)."
                     ),
                 },
                 "search": {

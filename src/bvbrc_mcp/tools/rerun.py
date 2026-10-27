@@ -101,7 +101,9 @@ async def _job_results(folder: str, config: Any, headers: Dict[str, str]) -> Dic
     listing = await workspace_browse(
         path=folder,
         workspace_types=["job_result"],
+        recursive=True,
         num_results=MAX_JOB_ITEMS + 1,
+        include_job_outputs=True,  # unchanged since before the default hid them
         config=config,
         headers=headers,
     )

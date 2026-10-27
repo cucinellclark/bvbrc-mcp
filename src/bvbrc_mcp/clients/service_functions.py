@@ -223,34 +223,6 @@ def _normalize_and_validate_comprehensive_genome_analysis_params(
 
     return normalized
 
-def _build_grid_payload(
-    entity_type: str,
-    items: list,
-    source: str = "bvbrc-service",
-    result_type: str = "list_result",
-    pagination: Dict[str, Any] = None,
-    sort: Dict[str, Any] = None,
-    columns: List[Dict[str, Any]] = None,
-    selectable: bool = True,
-    multi_select: bool = True,
-    sortable: bool = True
-) -> Dict[str, Any]:
-    return {
-        "schema_version": "1.0",
-        "entity_type": entity_type,
-        "source": source,
-        "result_type": result_type,
-        "capabilities": {
-            "selectable": selectable,
-            "multi_select": multi_select,
-            "sortable": sortable
-        },
-        "pagination": pagination,
-        "sort": sort,
-        "columns": columns or [],
-        "items": items if isinstance(items, list) else []
-    }
-
 def get_service_info(service_name: str) -> str:
     """
     Get service information from prompt files.
@@ -509,6 +481,63 @@ async def query_tasks(
             "source": "bvbrc-service"
         }
 
+_JOB_INPUT_LIST_MAX = 5
+_JOB_INPUT_STR_MAX = 200
+
+
+def _short_input(value: Any) -> Any:
+    """A job input as the model needs it: long lists and strings cut."""
+    if isinstance(value, str):
+        return value if len(value) <= _JOB_INPUT_STR_MAX else value[:_JOB_INPUT_STR_MAX] + "…"
+    if isinstance(value, list):
+        head = [_short_input(v) for v in value[:_JOB_INPUT_LIST_MAX]]
+        if len(value) > _JOB_INPUT_LIST_MAX:
+            head.append(f"… {len(value) - _JOB_INPUT_LIST_MAX} more")
+        return head
+    if isinstance(value, dict):
+        return {k: _short_input(v) for k, v in value.items()}
+    return value
+
+
+def compact_job(job: Dict[str, Any]) -> Dict[str, Any]:
+    """One ``enumerate_tasks_filtered`` job as the model reads it.
+
+    Where its result is: ``result_path`` (the job_result object) and
+    ``output_folder`` (the hidden folder with the files), from the
+    parameters' ``output_path`` / ``output_file``. ``inputs`` keeps the other
+    parameters that name data (internal ``_preflight``, numbers and flags
+    dropped; long values cut); ``get_job_details`` has the full set.
+    """
+    params = job.get("parameters") if isinstance(job.get("parameters"), dict) else {}
+    out: Dict[str, Any] = {
+        "id": job.get("id"),
+        "app": job.get("app") or job.get("application_name"),
+        "status": job.get("status"),
+        "submit_time": job.get("submit_time"),
+        "start_time": job.get("start_time"),
+        "completed_time": job.get("completed_time"),
+    }
+    if job.get("application_name") and job.get("application_name") != out["app"]:
+        out["service_name"] = job["application_name"]
+    if job.get("parent_id"):
+        out["parent_id"] = job["parent_id"]
+    folder, name = params.get("output_path"), params.get("output_file")
+    if folder and name:
+        folder = str(folder).rstrip("/")
+        out["result_path"] = f"{folder}/{name}"
+        out["output_folder"] = f"{folder}/.{name}"
+    elif folder:
+        out["output_folder"] = str(folder)
+    # Inputs that name data (text, lists, records); numbers and true/false
+    # settings (pilon_iter, trim, ...) are tuning, ~2/3 of an assembly job.
+    inputs = {k: _short_input(v) for k, v in params.items()
+              if not str(k).startswith("_") and k not in ("output_path", "output_file")
+              and isinstance(v, (str, list, dict)) and v not in ("", [], {})}
+    if inputs:
+        out["inputs"] = inputs
+    return {k: v for k, v in out.items() if v not in (None, "")}
+
+
 async def list_jobs(
     api: JsonRpcCaller,
     token: str = None,
@@ -572,60 +601,19 @@ async def list_jobs(
 
         # Keep parity with frontend behavior.
         jobs = [job for job in jobs if isinstance(job, dict) and job.get("status") != "deleted"]
-        
+
         return {
-            "items": jobs,
+            "items": [compact_job(job) for job in jobs],
             "total": total,
             "count": len(jobs),
             "offset": offset,
             "limit": limit,
             "query": search,
             "status": status,
+            "service": service,
             "sort_by": sort_by,
             "sort_dir": sort_dir,
-            "call": {
-                "tool": "list_jobs",
-                "backend_method": "AppService.enumerate_tasks_filtered",
-                # Keep replay metadata aligned with the MCP tool schema.
-                "arguments_executed": {
-                    "offset": offset,
-                    "limit": limit,
-                    "sort_by": sort_by,
-                    "sort_dir": sort_dir,
-                    "status": status,
-                    "service": service,
-                    "search": search,
-                    "include_archived": include_archived
-                },
-                "replayable": True
-            },
             "source": "bvbrc-service",
-            "ui_grid": _build_grid_payload(
-                entity_type="job",
-                items=jobs,
-                source="bvbrc-service",
-                result_type="list_result",
-                pagination={
-                    "total": total,
-                    "limit": limit,
-                    "offset": offset,
-                    "has_more": (offset + len(jobs)) < total
-                },
-                sort={
-                    "sort_by": sort_by,
-                    "sort_dir": sort_dir
-                },
-                columns=[
-                    {"key": "status", "label": "Status", "sortable": True},
-                    {"key": "id", "label": "Job ID", "sortable": True},
-                    {"key": "application_name", "label": "Service", "sortable": True},
-                    {"key": "submit_time", "label": "Submit", "sortable": True},
-                    {"key": "completed_time", "label": "Completed", "sortable": True}
-                ],
-                selectable=True,
-                multi_select=True,
-                sortable=True
-            )
         }
     except Exception as e:
         print(f"Error in list_jobs: {e}", file=sys.stderr)

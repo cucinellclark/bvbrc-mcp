@@ -79,6 +79,7 @@ TOOL_TIMEOUT_OVERRIDES: Dict[str, float] = {
     "rerun_jobs": 90.0,  # recursive listing + query_tasks + workflow catalog
     "list_samples": 60.0,  # one folder listing of up to 500 items
     "prepare_batch": 90.0,  # workflow inputs + up to 10 GoWe dry runs
+    "workspace_browse": 90.0,  # one search over every shared workspace: ~30 s for 1,264 job results
 }
 
 

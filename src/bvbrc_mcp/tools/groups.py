@@ -50,6 +50,8 @@ def _get_api(config: Any = None) -> Any:
 # Constants
 # ---------------------------------------------------------------------------
 
+MAX_LISTED_GROUPS = 300  # ~30 chars each in the loop's indented JSON: fits list_groups' 12,000 cap
+
 _GROUP_TYPE_CONFIG = {
     "genome_group": {
         "id_field": "genome_id",
@@ -182,7 +184,9 @@ async def list_groups(
     """List all genome or feature groups in the user's workspace.
 
     Searches the user's entire home directory for groups of the requested
-    type.  Returns a flat list of group names, paths, and creation dates.
+    type, leaving out groups inside job output folders.  Returns ``groups``
+    sorted: a name for a group in the default group folder, the full path
+    for one elsewhere; ``total``, and ``truncated`` past ``MAX_LISTED_GROUPS``.
 
     Args:
         group_type: ``"genome_group"`` or ``"feature_group"``.
@@ -190,7 +194,7 @@ async def list_groups(
         headers: HTTP headers with auth token.
 
     Returns:
-        Dict with ``groups`` (list of name/path dicts), ``count``, and
+        Dict with ``groups``, ``count``, ``total``, ``truncated``,
         ``message``; or ``error``.
     """
     if group_type not in _GROUP_TYPE_CONFIG:
@@ -221,26 +225,40 @@ async def list_groups(
     if "error" in result:
         return result
 
-    # Flatten the MCP response to a simpler structure for agents.
-    # The MCP version returns {result: {items, ui_grid, ...}, call: {...}}.
-    inner = result.get("result", result)
-    items = inner.get("items", [])
-    group_names = inner.get("group_names", [n.get("name", "") for n in items])
-    count = inner.get("count", len(items))
+    groups = result.get("groups", [])
+    total = len(groups)
     display = _GROUP_TYPE_CONFIG[group_type]["display_name"]
+    user_id = gf._get_user_id_from_token(token)
+    default_folder = gf._default_group_folder(user_id, group_type) if user_id else None
 
-    if group_names:
-        message = f"Found {count} {display}(s): {', '.join(group_names)}."
-    else:
-        message = f"No {display}s found in workspace."
+    # One string per group: the name for a group in the default folder, the
+    # full path for one kept elsewhere (get_group_ids takes either). 162
+    # groups used to be listed three times plus a ui_grid copy, and the
+    # model saw "at least 158".
+    shown = [
+        g["name"] if default_folder and g["path"] == f"{default_folder}/{g['name']}" else g["path"]
+        for g in groups[:MAX_LISTED_GROUPS]
+    ]
 
-    return {
-        "groups": [{"name": n} for n in group_names],
-        "count": count,
+    out: Dict[str, Any] = {
+        "groups": shown,
+        "count": len(shown),
+        "total": total,
+        "truncated": total > len(shown),
         "group_type": group_type,
-        "message": message,
         "source": "bvbrc-workspace",
     }
+    if default_folder:
+        out["default_folder"] = default_folder
+    notes = [f"{total} {display}s" + (f" (showing the first {len(shown)} by name)" if out["truncated"] else "") + "."]
+    hidden = result.get("hidden_in_job_outputs")
+    if hidden:
+        out["hidden_in_job_outputs"] = hidden
+        notes.append(f"{hidden} more inside job output folders are not listed.")
+    if not total:
+        notes = [f"No {display}s found in the workspace."]
+    out["message"] = " ".join(notes)
+    return out
 
 
 # ---------------------------------------------------------------------------

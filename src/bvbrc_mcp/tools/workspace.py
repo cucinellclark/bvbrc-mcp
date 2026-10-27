@@ -12,8 +12,15 @@ attributes) and a *headers* dict containing the ``Authorization`` token.
 
 from __future__ import annotations
 
+import re
+import time
 from typing import Any, Dict, List, Optional
 
+from bvbrc_mcp.clients.workspace_functions import (
+    NAME_MATCH_MODES,
+    name_regex,
+    valid_date,
+)
 from bvbrc_mcp.tools._clients import get_workspace_functions, get_json_rpc
 
 
@@ -132,6 +139,10 @@ def _path_not_found_result(resolved_path: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _invalid(message: str) -> Dict[str, Any]:
+    return {"error": message, "errorType": "INVALID_PARAMETERS", "source": "bvbrc-workspace"}
+
+
 def _epoch_to_iso(value: Any) -> Optional[str]:
     try:
         from datetime import datetime, timezone
@@ -180,6 +191,8 @@ def compact_workspace_item(item: Any) -> Any:
     return out
 
 
+MAX_SEARCH_ROOTS = 50  # folders searched in one call (paths, or every shared workspace)
+
 _PERMISSION_WORDS = {"r": "read", "w": "write", "a": "admin", "o": "owner", "n": "none"}
 BROWSE_SCOPES = ("shared", "public")
 
@@ -204,6 +217,60 @@ def _top_level_workspace(item: Any) -> Optional[Dict[str, Any]]:
     }
 
 
+# The top-level listing (~520 entries) and permission lookups, per user, for
+# a few minutes: one chat turn used to fetch the listing 7 times. A new share
+# shows up within _CACHE_SECONDS.
+_CACHE_SECONDS = 300
+_root_cache: Dict[str, tuple] = {}
+_perm_cache: Dict[tuple, tuple] = {}
+
+
+def clear_workspace_caches() -> None:
+    _root_cache.clear()
+    _perm_cache.clear()
+
+
+def _fresh(entry: Optional[tuple]) -> bool:
+    return bool(entry) and time.monotonic() - entry[0] < _CACHE_SECONDS
+
+
+async def _top_level_items(api: Any, token: str, user_id: Optional[str]) -> List[Any]:
+    """``Workspace.ls("/")`` tuples: every top-level workspace the token sees."""
+    hit = _root_cache.get(user_id) if user_id else None
+    if _fresh(hit):
+        return hit[1]
+    raw = await api.acall("Workspace.ls", {"paths": ["/"]}, 1, token)
+    listed = [i for entry in (raw or []) if isinstance(entry, dict)
+              for items in entry.values() if isinstance(items, list) for i in items]
+    if user_id:
+        _root_cache[user_id] = (time.monotonic(), listed)
+    return listed
+
+
+async def _permissions(api: Any, token: str, user_id: Optional[str], paths: List[str]) -> Dict[str, list]:
+    """``Workspace.list_permissions`` for *paths* (cached; best effort)."""
+    out: Dict[str, list] = {}
+    missing = []
+    for path in paths:
+        hit = _perm_cache.get((user_id, path)) if user_id else None
+        if _fresh(hit):
+            out[path] = hit[1]
+        else:
+            missing.append(path)
+    if missing:
+        try:
+            raw = await api.acall("Workspace.list_permissions", {"objects": missing}, 1, token)
+            perms = raw[0] if raw and isinstance(raw[0], dict) else {}
+        except Exception:
+            return out  # not cached: the next call tries again
+        now = time.monotonic()
+        for path in missing:
+            out[path] = perms.get(path) or []
+            if user_id:
+                _perm_cache[(user_id, path)] = (now, out[path])
+    return out
+
+
 async def _add_your_permission(api: Any, token: str, user_id: str, rows: List[Dict[str, Any]]) -> None:
     """Set ``your_permission`` on shared workspaces (one batched call).
 
@@ -212,11 +279,7 @@ async def _add_your_permission(api: Any, token: str, user_id: str, rows: List[Di
     ``Workspace.list_permissions``.  Best effort: on failure the field is
     left out.
     """
-    try:
-        raw = await api.acall("Workspace.list_permissions", {"objects": [w["path"] for w in rows]}, 1, token)
-        perms = raw[0] if raw and isinstance(raw[0], dict) else {}
-    except Exception:
-        perms = {}
+    perms = await _permissions(api, token, user_id, [w["path"] for w in rows])
     for w in rows:
         for who, perm in perms.get(w["path"]) or []:
             if who == user_id:
@@ -225,6 +288,19 @@ async def _add_your_permission(api: Any, token: str, user_id: str, rows: List[Di
             # Not shared by name: open to every user.
             w["your_permission"] = _PERMISSION_WORDS[w["_global"]]
             w["open_to_all_users"] = True
+
+
+async def _other_workspaces(api: Any, token: str, user_id: Optional[str], scope: str) -> List[Dict[str, Any]]:
+    """Other users' top-level workspaces: ``scope`` "shared" or "public"."""
+    rows: List[Dict[str, Any]] = []
+    for item in await _top_level_items(api, token, user_id):
+        ws = _top_level_workspace(item)
+        if not ws or (user_id and ws["owner"] == user_id):
+            continue
+        if (scope == "public") != ws["public"]:
+            continue
+        rows.append(ws)
+    return rows
 
 
 async def _browse_other_workspaces(
@@ -236,6 +312,9 @@ async def _browse_other_workspaces(
     sort_by: Optional[str],
     sort_order: Optional[str],
     num_results: int,
+    name_match: str = "all",
+    created_after: Optional[str] = None,
+    created_before: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Top-level workspaces of other users: shared with this user, or public.
 
@@ -244,21 +323,16 @@ async def _browse_other_workspaces(
     (global permission ``r``, several hundred).  The website's "Shared with
     me" / "Public Workspaces" views split the same list the same way.
     """
-    raw = await api.acall("Workspace.ls", {"paths": ["/"]}, 1, token)
-    rows: List[Dict[str, Any]] = []
-    listed = [i for entry in (raw or []) if isinstance(entry, dict)
-              for items in entry.values() if isinstance(items, list) for i in items]
-    for item in listed:
-        ws = _top_level_workspace(item)
-        if not ws or (user_id and ws["owner"] == user_id):
-            continue
-        if (scope == "public") != ws["public"]:
-            continue
-        rows.append(ws)
+    rows = await _other_workspaces(api, token, user_id, scope)
     total = len(rows)
-    terms = [t.lower() for t in (name_contains or []) if t and t.strip()]
-    if terms:
-        rows = [w for w in rows if all(t in f"{w['owner']}/{w['name']}".lower() for t in terms)]
+    pattern = name_regex(name_contains, None, name_match)
+    if pattern:
+        matcher = re.compile(pattern, re.IGNORECASE)
+        rows = [w for w in rows if matcher.search(f"{w['owner']}/{w['name']}")]
+    if created_after:
+        rows = [w for w in rows if str(w.get("creation_time") or "") >= created_after]
+    if created_before:
+        rows = [w for w in rows if str(w.get("creation_time") or "") < created_before]
     key = sort_by if sort_by in ("name", "creation_time") else "name"
     rows.sort(key=lambda w: (str(w.get(key) or "").lower(), w["owner"]),
               reverse=(sort_order == "desc"))
@@ -295,6 +369,14 @@ async def workspace_browse(
     sort_by: Optional[str] = None,
     sort_order: Optional[str] = None,
     num_results: int = 50,
+    recursive: Optional[bool] = None,
+    max_depth: Optional[int] = None,
+    offset: int = 0,
+    include_job_outputs: bool = False,
+    paths: Optional[List[str]] = None,
+    name_match: str = "all",
+    created_after: Optional[str] = None,
+    created_before: Optional[str] = None,
     config: Any = None,
     headers: Optional[Dict[str, str]] = None,
     **kwargs: Any,
@@ -303,12 +385,22 @@ async def workspace_browse(
 
     With *scope* (``"shared"`` / ``"public"``) it lists other users' top-level
     workspaces instead of a path; *name_contains*, *sort_by* and
-    *num_results* still apply.
+    *num_results* still apply. ``scope="shared"`` with ``recursive=true`` (or
+    a type / extension filter) searches inside every shared workspace in one
+    call instead. Public workspaces are found by name only.
 
-    Uses ``workspace_functions.workspace_browse`` which handles both
-    directory listing (no filters) and recursive search (with filters).
+    *paths* lists or searches several folders in one call.
 
-    Returns the full response including items and ``ui_grid`` payload.
+    Filters: *name_contains* with *name_match* (``all`` / ``any`` / ``word``)
+    and *created_after* / *created_before* (ISO dates). Job questions
+    ("which failed", "where are my assembly results") are ``list_jobs``'s.
+
+    Uses ``workspace_functions.workspace_browse``: a listing of *path*, or
+    with *recursive* a search under it (filters present and *recursive* not
+    given → recursive, the behaviour before the switch existed). Results are
+    paged (*num_results*, *offset* → ``next_offset``) and say how many
+    matched (``total``, ``truncated``, ``summary``); searches leave out files
+    inside job output folders unless *include_job_outputs*.
     """
     ws_fn = get_workspace_functions(getattr(config, "mcp_server_path", None))
     api = _get_api(config)
@@ -326,7 +418,26 @@ async def workspace_browse(
     if not num_results or num_results < 1:
         num_results = 50
     num_results = min(num_results, 500)
+    try:
+        offset = max(0, int(offset or 0))
+    except (TypeError, ValueError):
+        offset = 0
+    if max_depth is not None:
+        try:
+            max_depth = max(0, int(max_depth))
+        except (TypeError, ValueError):
+            max_depth = None
 
+    name_match = (name_match or "all").lower()
+    if name_match not in NAME_MATCH_MODES:
+        return _invalid(f"name_match must be one of {', '.join(NAME_MATCH_MODES)}.")
+    for label, value in (("created_after", created_after), ("created_before", created_before)):
+        if value and not valid_date(value):
+            return _invalid(f"{label} must be an ISO date like 2026-10-01 (got {value!r}).")
+
+    search_inside = recursive is True or bool(file_extensions) or bool(workspace_types)
+    scope_note = None
+    roots: List[str] = []
     if scope:
         if scope not in BROWSE_SCOPES:
             return {
@@ -334,18 +445,60 @@ async def workspace_browse(
                 "errorType": "INVALID_PARAMETERS",
                 "source": "bvbrc-workspace",
             }
-        try:
-            return await _browse_other_workspaces(
-                api, token, user_id, scope, name_contains, sort_by, sort_order, num_results,
-            )
-        except Exception as e:
+        if scope == "public" and search_inside:
             return {
-                "error": f"Listing {scope} workspaces failed: {type(e).__name__}: {e}",
-                "errorType": "API_ERROR",
+                "error": (
+                    "Public workspaces can only be found by name (scope='public' with "
+                    "name_contains on the workspace or owner name); there are hundreds, "
+                    "so their contents are not searched. To look inside one, browse its path."
+                ),
+                "errorType": "INVALID_PARAMETERS",
                 "source": "bvbrc-workspace",
             }
+        if scope == "shared" and search_inside:
+            try:
+                shared = await _other_workspaces(api, token, user_id, "shared")
+            except Exception as e:
+                return {
+                    "error": f"Listing shared workspaces failed: {type(e).__name__}: {e}",
+                    "errorType": "API_ERROR",
+                    "source": "bvbrc-workspace",
+                }
+            if not shared:
+                return {"scope": "shared", "items": [], "count": 0, "total": 0,
+                        "note": "No workspaces are shared with you.", "source": "bvbrc-workspace"}
+            shared.sort(key=lambda w: (w["name"].lower(), w["owner"]))
+            roots = [w["path"] for w in shared][:MAX_SEARCH_ROOTS]
+            scope_note = f"Searched {len(roots)} workspace{'s' if len(roots) != 1 else ''} shared with you."
+            if len(shared) > len(roots):
+                scope_note += f" {len(shared) - len(roots)} more were not searched (limit {MAX_SEARCH_ROOTS})."
+            recursive = True
+        else:
+            try:
+                return await _browse_other_workspaces(
+                    api, token, user_id, scope, name_contains, sort_by, sort_order, num_results,
+                    name_match=name_match, created_after=created_after, created_before=created_before,
+                )
+            except Exception as e:
+                return {
+                    "error": f"Listing {scope} workspaces failed: {type(e).__name__}: {e}",
+                    "errorType": "API_ERROR",
+                    "source": "bvbrc-workspace",
+                }
 
-    resolved_path = _resolve_path(path, user_id)
+    if not roots and paths:
+        if isinstance(paths, str):
+            paths = [paths]
+        roots = list(dict.fromkeys(_resolve_path(p, user_id) for p in paths if p))
+        if len(roots) > MAX_SEARCH_ROOTS:
+            return {
+                "error": f"{len(roots)} paths given; at most {MAX_SEARCH_ROOTS} per call.",
+                "errorType": "INVALID_PARAMETERS",
+                "source": "bvbrc-workspace",
+            }
+    resolved_path = roots[0] if len(roots) == 1 else _resolve_path(path, user_id)
+    if len(roots) == 1:
+        roots = []
 
     try:
         result = await ws_fn.workspace_browse(
@@ -358,6 +511,14 @@ async def workspace_browse(
             sort_by=sort_by,
             sort_order=sort_order,
             num_results=num_results,
+            offset=offset,
+            recursive=recursive,
+            max_depth=max_depth,
+            include_job_outputs=bool(include_job_outputs),
+            paths=roots or None,
+            name_match=name_match,
+            created_after=created_after,
+            created_before=created_before,
             tool_name="workspace_browse",
         )
 
@@ -371,10 +532,13 @@ async def workspace_browse(
             inner = result["result"]
             if isinstance(inner.get("items"), list):
                 inner["items"] = [compact_workspace_item(i) for i in inner["items"]]
+            if scope_note:
+                inner["scope"] = scope
+                inner["note"] = scope_note
 
         # Attach a workspace browser URL so the LLM can include a
         # clickable markdown link in its response.
-        if isinstance(result, dict) and not result.get("error"):
+        if isinstance(result, dict) and not result.get("error") and not roots:
             from bvbrc_mcp.tools.url_utils import build_workspace_url
 
             ws_url = build_workspace_url(resolved_path)

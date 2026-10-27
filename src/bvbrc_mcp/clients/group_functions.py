@@ -68,36 +68,6 @@ def _normalize_name(name: str) -> str:
     return (name or "").strip().lower()
 
 
-def _build_grid_payload(
-    entity_type: str,
-    items: list = None,
-    result_type: str = "list_result",
-    pagination: dict = None,
-    sort: dict = None,
-    source: str = "bvbrc-workspace",
-    columns: list = None,
-    selectable: bool = True,
-    multi_select: bool = True,
-    sortable: bool = True,
-) -> dict:
-    """Build a structured grid payload for frontend rendering."""
-    return {
-        "schema_version": "1.0",
-        "entity_type": entity_type,
-        "source": source,
-        "result_type": result_type,
-        "capabilities": {
-            "selectable": selectable,
-            "multi_select": multi_select,
-            "sortable": sortable,
-        },
-        "pagination": pagination,
-        "sort": sort,
-        "columns": columns or [],
-        "items": items or [],
-    }
-
-
 # ---------------------------------------------------------------------------
 # Core workspace calls (thin wrappers around JSON-RPC)
 # ---------------------------------------------------------------------------
@@ -337,40 +307,18 @@ async def list_groups(
     group_type: str,
     token: str,
     folder: Optional[str] = None,
+    include_job_outputs: bool = False,
     tool_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    List all groups of the given type in a folder.
+    List all groups of the given type under a folder (recursive).
 
-    If *folder* is not provided, uses the default group folder
-    (e.g. ``/{user}/home/Genome Groups``).
+    If *folder* is not provided, searches the user's home. Groups inside
+    hidden folders (job outputs) are left out unless *include_job_outputs*;
+    ``hidden_in_job_outputs`` counts them.
 
-    Returns a structured envelope with ``result``, ``call``, and ``ui_grid``
-    so that the frontend can render groups in an interactive grid and the
-    LLM receives only a concise summary.
-
-    Returns
-    -------
-    ::
-
-        {
-            "result": {
-                "items": [...],
-                "tool_name": "list_genome_groups",
-                "result_type": "list_result",
-                "count": N,
-                "path": "/user/home/Genome Groups",
-                "source": "bvbrc-workspace",
-                "ui_grid": { ... }
-            },
-            "call": {
-                "tool": "list_genome_groups",
-                "backend_method": "Workspace.ls",
-                "arguments_executed": { ... },
-                "replayable": true,
-                "replay": { ... }
-            }
-        }
+    Returns ``{"groups": [{name, path, creation_time}], "total", "folder",
+    "hidden_in_job_outputs"?}`` sorted by name, or an error dict.
     """
     user_id = _get_user_id_from_token(token)
     if not user_id:
@@ -392,79 +340,32 @@ async def list_groups(
     if "error" in search_result:
         return search_result
 
-    items = search_result.get("items", [])
-    display = GROUP_TYPE_CONFIG[group_type]["display_name"]
-
-    # Derive tool_name if not provided
-    if not tool_name:
-        tool_name = f"list_{group_type}s"  # e.g. "list_genome_groups"
-
+    root = folder.rstrip("/")
     groups = []
-    group_names = []
-    for item in items:
+    hidden = 0
+    for item in search_result.get("items", []):
+        parent = str(item[2] or "") if len(item) > 2 else ""
+        rel = parent[len(root):] if parent.startswith(root) else parent
+        if not include_job_outputs and any(seg.startswith(".") for seg in rel.split("/") if seg):
+            hidden += 1
+            continue
         name = str(item[0])
-        group_names.append(name)
         groups.append({
             "name": name,
-            "path": f"{item[2]}{name}" if len(item) > 2 else name,
-            "type": item[1] if len(item) > 1 else group_type,
+            "path": f"{parent.rstrip('/')}/{name}" if parent else name,
             "creation_time": item[3] if len(item) > 3 else None,
-            "size": item[6] if len(item) > 6 else None,
         })
+    groups.sort(key=lambda g: (g["name"].lower(), g["path"]))
 
-    # Build a concise LLM snapshot: count + names only.
-    # The full data lives in ui_grid for the frontend / replay.
-    if groups:
-        names_str = ", ".join(group_names)
-        message = (
-            f"Found {len(groups)} {display}(s): {names_str}. "
-            "The complete details are displayed in the table for the user."
-        )
-    else:
-        message = f"No {display}s found in {folder}."
-
-    return {
-        "result": {
-            # Snapshot for the LLM — names only, no paths or metadata
-            "items": [{"name": g["name"]} for g in groups],
-            "tool_name": tool_name,
-            "result_type": "search_result",
-            "count": len(groups),
-            "group_names": group_names,
-            "message": message,
-            "is_snapshot": True,
-            "path": folder,
-            "source": "bvbrc-workspace",
-            # Full data for the frontend / replay
-            "ui_grid": _build_grid_payload(
-                entity_type=group_type,
-                items=groups,
-                result_type="search_result",
-                source="bvbrc-workspace",
-                sort={"sort_by": "name", "sort_order": "asc"},
-                pagination={"limit": len(groups), "offset": 0, "has_more": False},
-                columns=[
-                    {"key": "name", "label": "Name", "sortable": True},
-                    {"key": "type", "label": "Type", "sortable": True},
-                    {"key": "creation_time", "label": "Created", "sortable": True},
-                    {"key": "size", "label": "Size", "sortable": True},
-                ],
-            ),
-        },
-        "call": {
-            "tool": tool_name,
-            "backend_method": "Workspace.ls",
-            "arguments_executed": {
-                "group_type": group_type,
-                "folder": folder,
-            },
-            "replayable": True,
-            "replay": {
-                "path": folder,
-                "group_type": group_type,
-            },
-        },
+    result = {
+        "groups": groups,
+        "total": len(groups),
+        "folder": folder,
+        "source": "bvbrc-workspace",
     }
+    if hidden:
+        result["hidden_in_job_outputs"] = hidden
+    return result
 
 
 # ---------------------------------------------------------------------------

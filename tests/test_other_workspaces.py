@@ -114,3 +114,97 @@ async def test_group_path_missing_or_not_a_group():
     assert r["errorType"] == "WRONG_TYPE"
     r = await gf.get_group_ids(api, GROUP, "feature_group", "t")
     assert r["errorType"] == "WRONG_TYPE"
+
+
+# ── Part 3 (2026-10-27): searching inside shared workspaces, cache ────────
+# "Do any shared workspaces have Streptococcus data?" took 20 calls and 33 s:
+# one recursive search per shared workspace, and the top-level listing was
+# fetched again on every scope call.
+
+class SearchingApi(FakeApi):
+    """Top-level listing from ROOT; a recursive ls of a root returns its files."""
+
+    def __init__(self, trees, broken=()):
+        super().__init__(ls=ROOT)
+        self.trees, self.broken = trees, set(broken)
+
+    async def acall(self, method, params, request_id=1, token=None):
+        if method == "Workspace.ls" and params["paths"] != ["/"]:
+            self.calls.append((method, params))
+            root = params["paths"][0]
+            if root in self.broken:
+                raise RuntimeError("_ERROR_User lacks permission to " + root)
+            types = (params.get("query") or {}).get("type")
+            return [{root: [i for i in self.trees.get(root, []) if not types or i[1] in types]}]
+        return await super().acall(method, params, request_id, token)
+
+
+def _file(name, parent, typ="genome_group"):
+    return [name, typ, parent, "2025-02-01T00:00:00Z", "id-" + name, "x", 1, {}, {}, "r", "n", ""]
+
+
+TREES = {
+    "/allan@patricbrc.org/AllanShare": [_file("Streptococcus public", "/allan@patricbrc.org/AllanShare/")],
+    "/bob@patricbrc.org/TeamData": [_file("strep.fasta", "/bob@patricbrc.org/TeamData/seqs/", "contigs"),
+                                    _file("strep_contigs.fa", "/bob@patricbrc.org/TeamData/.asm1/", "contigs")],
+}
+
+
+async def test_shared_search_looks_inside_every_shared_workspace(monkeypatch):
+    fake = SearchingApi(TREES)
+    monkeypatch.setattr(ws, "_get_api", lambda config=None: fake)
+    r = await ws.workspace_browse(scope="shared", name_contains=["strep"], recursive=True, headers=HEADERS)
+    inner = r["result"]
+    assert sorted(i["name"] for i in inner["items"]) == ["Streptococcus public", "strep.fasta"]
+    assert inner["summary"]["by_root"] == {"/allan@patricbrc.org/AllanShare": 1, "/bob@patricbrc.org/TeamData": 1}
+    assert inner["hidden_in_job_outputs"] == 1 and inner["scope"] == "shared"
+    assert "3 workspaces shared with you" in inner["note"]
+    searched = sorted(p["paths"][0] for m, p in fake.calls if m == "Workspace.ls" and p["paths"] != ["/"])
+    assert searched == ["/allan@patricbrc.org/AllanShare", "/bob@patricbrc.org/TeamData", "/carol@patricbrc.org/Scratch"]
+    assert "workspace_browser_url" not in r
+
+
+async def test_one_unreadable_workspace_does_not_sink_the_search(monkeypatch):
+    fake = SearchingApi(TREES, broken={"/carol@patricbrc.org/Scratch"})
+    monkeypatch.setattr(ws, "_get_api", lambda config=None: fake)
+    inner = (await ws.workspace_browse(scope="shared", workspace_types=["genome_group"], headers=HEADERS))["result"]
+    assert [i["name"] for i in inner["items"]] == ["Streptococcus public"]
+    assert inner["unreadable"][0]["path"] == "/carol@patricbrc.org/Scratch"
+
+
+async def test_shared_without_recursive_still_lists_workspaces_by_name(monkeypatch):
+    fake = SearchingApi(TREES)
+    monkeypatch.setattr(ws, "_get_api", lambda config=None: fake)
+    r = await ws.workspace_browse(scope="shared", name_contains=["team"], headers=HEADERS)
+    assert [w["name"] for w in r["items"]] == ["TeamData"]
+
+
+async def test_public_contents_are_never_searched(api):
+    r = await ws.workspace_browse(scope="public", recursive=True, name_contains=["flu"], headers=HEADERS)
+    assert r["errorType"] == "INVALID_PARAMETERS" and "by name" in r["error"] and api.calls == []
+
+
+async def test_several_paths_in_one_call(monkeypatch):
+    fake = SearchingApi(TREES)
+    monkeypatch.setattr(ws, "_get_api", lambda config=None: fake)
+    inner = (await ws.workspace_browse(paths=list(TREES), recursive=True, headers=HEADERS))["result"]
+    assert inner["paths"] == list(TREES) and inner["total"] == 2
+    assert {i["path"] for i in inner["items"]} == {"/allan@patricbrc.org/AllanShare/Streptococcus public",
+                                                  "/bob@patricbrc.org/TeamData/seqs/strep.fasta"}
+
+
+async def test_top_level_listing_and_permissions_are_cached(api):
+    await ws.workspace_browse(scope="shared", headers=HEADERS)
+    await ws.workspace_browse(scope="public", name_contains=["work"], headers=HEADERS)
+    await ws.workspace_browse(scope="shared", headers=HEADERS)
+    assert [m for m, _ in api.calls] == ["Workspace.ls", "Workspace.list_permissions"]
+    ws.clear_workspace_caches()
+    await ws.workspace_browse(scope="public", headers=HEADERS)
+    assert [m for m, _ in api.calls].count("Workspace.ls") == 2
+
+
+async def test_scope_names_take_name_match_and_dates(api):
+    r = await ws.workspace_browse(scope="public", name_contains=["workshop", "nvddthd"], name_match="any", headers=HEADERS)
+    assert {w["name"] for w in r["items"]} == {"2023-NVDDTHD", "BV-BRC Workshop"}
+    r = await ws.workspace_browse(scope="public", created_after="2025-01-01", headers=HEADERS)
+    assert r["items"] == []
