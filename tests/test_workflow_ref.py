@@ -99,3 +99,11 @@ async def test_get_workflow_inputs_bad_ref_returns_the_hint(patched):
     r = await gowe.get_workflow_inputs("wf_893a5074-258b-4682-b9fa-6cb79a52943e", config=None)
     assert "error" in r and "MetaCATS" in r["error"]
     assert "inputs" not in r
+
+
+def test_no_gowe_url_is_an_error_not_another_server():
+    # Before 2026-10-28 a missing gowe_url fell back to the dev GoWe's address.
+    from types import SimpleNamespace
+    with pytest.raises(RuntimeError, match="No GoWe server"):
+        gowe._get_client(SimpleNamespace(gowe_url=None))
+    assert gowe._get_client(SimpleNamespace(gowe_url="http://gowe.test")) is not None
