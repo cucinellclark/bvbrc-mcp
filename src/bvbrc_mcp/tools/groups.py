@@ -356,6 +356,24 @@ def _clean_ids(ids: Any, group_type: str) -> tuple[list[str], list[str]]:
     return good, bad
 
 
+def _merge_members(listed: list[str], found: list[str], limit: int) -> list[str]:
+    """Listed ids first (all of them), then query matches up to *limit* in all.
+
+    The listed ids are the ones the caller must have in the group (a
+    reference genome next to a query's sample), so they are never cut; the
+    query fills the remaining slots, skipping ids already listed.
+    """
+    out = list(listed)
+    seen = set(out)
+    for i in found:
+        if len(out) >= limit:
+            break
+        if i not in seen:
+            seen.add(i)
+            out.append(i)
+    return out
+
+
 async def _patric_to_feature_ids(
     ids: list[str], token: Optional[str], base_url: Optional[str]
 ) -> tuple[list[str], list[str]]:
@@ -393,13 +411,15 @@ async def _patric_to_feature_ids(
 def selection_summary(arguments: Dict[str, Any]) -> str:
     """How a create_group call selects its members, for a question card."""
     ids = arguments.get("ids")
-    if isinstance(ids, list) and ids:
-        return f"{len(ids)} listed ids"
+    listed = f"{len(ids)} listed id{'s' if len(ids) != 1 else ''}" if isinstance(ids, list) and ids else ""
     query = str(arguments.get("query") or "").strip()
     if len(query) > 160:
         query = query[:157] + "..."
     coll = arguments.get("collection") or ""
-    return f"{coll}: {query}" if coll and query else query
+    selected = f"{coll}: {query}" if coll and query else query
+    if listed and selected:
+        return f"{listed} + {selected}"
+    return listed or selected
 
 
 async def count_group_members(arguments: Dict[str, Any], config: Any = None,
@@ -415,12 +435,10 @@ async def count_group_members(arguments: Dict[str, Any], config: Any = None,
     group_type = arguments.get("group_type")
     if group_type not in _GROUP_TYPE_CONFIG:
         return None
-    if arguments.get("ids"):
-        good, _ = _clean_ids(arguments.get("ids"), group_type)
-        return len(good)
+    listed, _ = _clean_ids(arguments.get("ids"), group_type)
     query = arguments.get("query")
     if not query:
-        return None
+        return len(listed) if listed else None
     token = _extract_token(headers) or getattr(config, "bvbrc_auth_token", None)
     try:
         res = await _get_solr_query_fn()(
@@ -437,6 +455,10 @@ async def count_group_members(arguments: Dict[str, Any], config: Any = None,
         limit = max(1, min(int(arguments.get("limit") or _DEFAULT_LIMIT), _MAX_LIMIT))
     except (TypeError, ValueError):
         limit = _DEFAULT_LIMIT
+    if listed:
+        # Listed ids are always kept; the query fills up to limit.  Overlap
+        # between the two is unknown here, so this is an upper bound.
+        return max(len(listed), min(len(listed) + n, limit))
     return min(n, limit)
 
 
@@ -465,22 +487,21 @@ async def resolve_group_members(arguments: Dict[str, Any], config: Any = None,
         limit = max(1, min(int(arguments.get("limit") or _DEFAULT_LIMIT), _MAX_LIMIT))
     except (TypeError, ValueError):
         limit = _DEFAULT_LIMIT
-    if arguments.get("ids"):
-        good, _ = _clean_ids(arguments.get("ids"), group_type)
-        return frozenset(good[:limit]) or None
+    listed, _ = _clean_ids(arguments.get("ids"), group_type)
     query = arguments.get("query")
     if not query:
-        return None
+        return frozenset(listed[:limit]) or None
     token = _extract_token(headers) or getattr(config, "bvbrc_auth_token", None)
     try:
         res = await _fetch_ids_by_query(
             collection=arguments.get("collection") or _GROUP_TYPE_CONFIG[group_type]["default_collection"],
-            query=query, id_field=_GROUP_TYPE_CONFIG[group_type]["id_field"], limit=limit,
+            query=query, id_field=_GROUP_TYPE_CONFIG[group_type]["id_field"],
+            limit=min(limit + len(listed), _MAX_LIMIT),
             token=token, base_url=getattr(config, "bvbrc_api_url", None),
         )
     except Exception:
         return None
-    return frozenset(res.get("ids") or []) or None
+    return frozenset(_merge_members(listed, res.get("ids") or [], limit)) or None
 
 
 async def _workspace_group_members(paths: List[str], config: Any, headers: Optional[Dict[str, str]]) -> Dict[str, frozenset]:
@@ -576,10 +597,12 @@ async def create_group(
     headers: Optional[Dict[str, str]] = None,
     **kwargs: Any,
 ) -> Dict[str, Any]:
-    """Create a genome or feature group from a Solr query or explicit ids.
+    """Create a genome or feature group from a Solr query, explicit ids, or both.
 
     Runs the query against BV-BRC Solr to fetch matching IDs (up to
-    *limit*), then creates the group in the user's workspace.
+    *limit*), then creates the group in the user's workspace.  With both,
+    the listed ids are always members and the query fills the group up to
+    *limit* ("50 M. tuberculosis genomes including H37Rv").
 
     Args:
         group_name: Name for the new group.
@@ -589,6 +612,8 @@ async def create_group(
         query: Solr query string (Lucene syntax, same as ``search_data``).
         limit: Maximum number of IDs to include (default 500, max 25000).
             Use this to cap group size for services with input limits.
+            Listed ids are never cut when a query is given too.
+        ids: Explicit member ids; with a query, ids the group must contain.
         if_exists: What to do when a group of that name already exists:
             ``"error"`` (default, returns ``errorType: ALREADY_EXISTS``),
             ``"append"`` (add the new IDs to the existing group, deduplicated)
@@ -628,12 +653,13 @@ async def create_group(
     base_url = getattr(config, "bvbrc_api_url", None)
 
     has_query = bool(query and str(query).strip())
-    if has_query == bool(ids):
+    if not has_query and not ids:
         return {
-            "error": "Give exactly one of query (with collection) or ids.",
+            "error": "Give a query (with collection), ids, or both.",
             "errorType": "INVALID_PARAMETERS",
         }
 
+    listed: list[str] = []
     if ids:
         # --- Step 1 (ids): validate, keep order, drop duplicates ---
         given = ids
@@ -661,27 +687,31 @@ async def create_group(
                     ),
                     "errorType": "NOT_FOUND",
                 }
-        total_matching = len(ids)
-        ids = ids[:limit]
+        listed = list(ids)
+
+    if not has_query:
+        total_matching = len(listed)
+        ids = listed[:limit]
         query = None
         collection = None
     else:
-        # --- Step 1: Fetch IDs by query ---
+        # --- Step 1: Fetch IDs by query (with listed ids: they come first) ---
         collection = collection or type_cfg["default_collection"]
         fetch_result = await _fetch_ids_by_query(
             collection=collection,
             query=query,
             id_field=id_field,
-            limit=limit,
+            limit=min(limit + len(listed), _MAX_LIMIT),
             token=token,
             base_url=base_url,
         )
 
+        # A failed query never leaves just the listed ids: report it.
         if "error" in fetch_result and not fetch_result.get("ids"):
             return fetch_result
 
-        ids = fetch_result["ids"]
-        total_matching = fetch_result.get("total_matching", len(ids))
+        ids = _merge_members(listed, fetch_result["ids"], limit)
+        total_matching = fetch_result.get("total_matching", len(fetch_result["ids"]))
 
     if not ids:
         return {
@@ -725,8 +755,13 @@ async def create_group(
     action = result.get("action", "created")
     count = result.get("count", len(ids))
     path = result.get("path", "")
-    limited = len(ids) < total_matching
-    limit_note = f" (query limited to {len(ids)} of {total_matching:,} matches)" if limited else ""
+    from_query = len(ids) - len(listed) if has_query else 0
+    if has_query and listed:
+        limit_note = (f" ({len(listed)} listed + {from_query} from the query, "
+                      f"of {total_matching:,} matches)")
+    else:
+        limited = len(ids) < total_matching
+        limit_note = f" (query limited to {len(ids)} of {total_matching:,} matches)" if limited else ""
 
     if action == "appended":
         message = (
@@ -756,6 +791,7 @@ async def create_group(
         "query_used": query,
         "collection": collection,
         "limit_applied": limit if count < total_matching else None,
+        **({"listed": len(listed), "from_query": from_query} if has_query and listed else {}),
         "message": message,
         "source": "bvbrc-workspace",
     }

@@ -827,12 +827,16 @@ CREATE_GROUP = {
         "name": "create_group",
         "description": (
             "Create a genome or feature group in the user's BV-BRC workspace. "
-            "Give EITHER a Solr query (any collection: genome, genome_amr, "
+            "Give a Solr query (any collection: genome, genome_amr, "
             "genome_feature, sp_gene, ...; the tool collects the genome_id or "
-            "feature_id of every matching row, deduplicated, up to limit) OR "
-            "an explicit list of ids -- never both. Use the query when the "
+            "feature_id of every matching row, deduplicated, up to limit), "
+            "an explicit list of ids, or both. Use the query when the "
             "selection is described by fields; use ids for pasted lists or "
-            "ids an earlier step found. Use this when the user asks to save "
+            "ids an earlier step found. Give both when the group must contain "
+            "specific ids as well as the query's matches (a sample plus a "
+            "reference genome): the listed ids are always members and the "
+            "query fills the group up to limit, so the reference is never "
+            "left out and no second call is needed. Use this when the user asks to save "
             "results as a group, or when a downstream service needs a genome "
             "or feature group as input. For mixed exact subsets (e.g. 5 of A "
             "and 5 of B), pass the chosen ids; a single A OR B query with "
@@ -863,27 +867,29 @@ CREATE_GROUP = {
                     "description": (
                         "Solr query string (same syntax as search_data). "
                         "Example: 'genus:Salmonella AND host_name:Human'. "
-                        "Omit when ids is given."
+                        "Omit for a group of listed ids only."
                     ),
                 },
                 "ids": {
                     "type": "array",
                     "items": {"type": "string"},
                     "description": (
-                        "Explicit member ids instead of a query: genome ids "
-                        "like 83332.12 for a genome group; for a feature "
-                        "group, feature_id values (PATRIC.83332.12...) or "
-                        "patric_ids (fig|83332.12.peg.3062), which the tool "
-                        "converts to feature_id. Order is kept, duplicates "
-                        "dropped."
+                        "Explicit member ids: genome ids like 83332.12 for a "
+                        "genome group; for a feature group, feature_id values "
+                        "(PATRIC.83332.12...) or patric_ids "
+                        "(fig|83332.12.peg.3062), which the tool converts to "
+                        "feature_id. Order is kept, duplicates dropped. With a "
+                        "query: ids the group must contain, put first and "
+                        "never cut by limit."
                     ),
                 },
                 "limit": {
                     "type": "integer",
                     "description": (
-                        "Maximum number of IDs to include in the group. "
-                        "Default 500. Some services have input limits -- "
-                        "use this to cap the group size accordingly."
+                        "Maximum number of IDs to include in the group "
+                        "(listed ids count toward it). Default 500. Some "
+                        "services have input limits -- use this to cap the "
+                        "group size accordingly."
                     ),
                     "default": 500,
                 },
