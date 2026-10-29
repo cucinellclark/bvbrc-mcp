@@ -6,7 +6,7 @@
     result = await dispatch("search_data", {"collection": "genome", "query": "genus:Salmonella"}, ctx)
 """
 
-__version__ = "0.1.0.dev0"
+__version__ = "0.1.0"
 
 from bvbrc_mcp.context import ToolContext
 from bvbrc_mcp.registry import SIDE_EFFECT_TOOLS, TOOLS, TOOLS_BY_NAME, Tool, dispatch
